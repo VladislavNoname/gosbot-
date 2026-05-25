@@ -2183,7 +2183,7 @@ App.renderHome();
 
 
 /* API Sync — прогресс через VPS (синхронизация с ботом) */
-const API_URL = 'https://ВАШ_ДОМЕН';  // ← вставить домен/IP VPS с https://
+const API_URL = 'https://gosbot.ddns.net';  // ← вставить домен/IP VPS с https://
 
 (function() {
   const tgUser   = tg?.initDataUnsafe?.user;
@@ -2245,18 +2245,20 @@ App.goHome = function() { _gh(); setBackBtn(false); };
 
 /* Старт */
 async function checkAccess() {
-  const user      = tg?.initDataUnsafe?.user;
-  const initData  = tg?.initData || '';
-  if (!user?.id || !initData || !API_URL.startsWith('https')) return true; // вне Telegram — пропускаем
+  const user     = tg?.initDataUnsafe?.user;
+  const initData = tg?.initData || '';
+  // Если открыт вне Telegram или API не настроен — пропускаем проверку
+  if (!user?.id || !initData) return true;
+  if (!API_URL || API_URL.includes('ВАШ_ДОМЕН') || !API_URL.startsWith('https')) return true;
   try {
     const r = await fetch(`${API_URL}/access/${user.id}`, {
       headers: { 'Authorization': 'TgInitData ' + initData },
     });
-    if (!r.ok) return false;
+    if (!r.ok) return true; // ошибка сети/сервера — не блокируем
     const data = await r.json();
-    return data.allowed === true;
+    return data.allowed !== false; // блокируем только при явном false
   } catch(e) {
-    return false;
+    return true; // нет связи с API — не блокируем
   }
 }
 
