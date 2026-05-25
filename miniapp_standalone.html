@@ -2183,7 +2183,7 @@ App.renderHome();
 
 
 /* API Sync — прогресс через VPS (синхронизация с ботом) */
-const API_URL = 'https://gosbot.ddns.net';  // ← вставить домен/IP VPS с https://
+const API_URL = 'https://ВАШ_ДОМЕН';  // ← вставить домен/IP VPS с https://
 
 (function() {
   const tgUser   = tg?.initDataUnsafe?.user;
@@ -2244,12 +2244,47 @@ App.goHome = function() { _gh(); setBackBtn(false); };
 });
 
 /* Старт */
+async function checkAccess() {
+  const user      = tg?.initDataUnsafe?.user;
+  const initData  = tg?.initData || '';
+  if (!user?.id || !initData || !API_URL.startsWith('https')) return true; // вне Telegram — пропускаем
+  try {
+    const r = await fetch(`${API_URL}/access/${user.id}`, {
+      headers: { 'Authorization': 'TgInitData ' + initData },
+    });
+    if (!r.ok) return false;
+    const data = await r.json();
+    return data.allowed === true;
+  } catch(e) {
+    return false;
+  }
+}
+
+function showNoAccess(loader, ltext) {
+  loader.style.background = 'var(--bg, #1a1a2e)';
+  loader.style.opacity    = '1';
+  loader.style.display    = 'flex';
+  ltext.innerHTML =
+    '<div style="text-align:center;padding:32px 24px;">' +
+    '<div style="font-size:48px;margin-bottom:16px;">🔒</div>' +
+    '<div style="font-size:18px;font-weight:700;margin-bottom:10px;">Доступ закрыт</div>' +
+    '<div style="font-size:14px;color:#888;line-height:1.5;">Для использования тренажёра<br>необходимо оплатить доступ.<br><br>' +
+    'Обратись к администратору бота.</div>' +
+    '</div>';
+}
+
 async function boot() {
   const loader = document.getElementById('tg-loader');
   const ltext  = document.getElementById('tg-loader-text');
   const header = document.getElementById('main-header');
   const appEl  = document.getElementById('app');
   try {
+    ltext.textContent = 'Проверяем доступ…';
+    const allowed = await checkAccess();
+    if (!allowed) {
+      showNoAccess(loader, ltext);
+      return;
+    }
     ltext.textContent = 'Загружаем вопросы…';
     await loadQuestions();
     ltext.textContent = 'Синхронизируем прогресс…';
