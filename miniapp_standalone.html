@@ -1107,32 +1107,6 @@ const App = {
       ),
     ));
 
-    // Блок «Мои правки»
-    const overrideCount = Store.countOverrides();
-    this.root.appendChild(el('h2', {}, 'Правки вопросов'));
-    const editBlock = el('div', { class: 'patches-block' });
-    editBlock.appendChild(el('div', { class: 'patches-info' },
-      overrideCount > 0
-        ? el('div', {},
-            el('strong', {}, `${overrideCount} ${pluralRu(overrideCount, 'правка', 'правки', 'правок')}`),
-            el('div', { class: 'muted small', style: 'margin-top:4px;' },
-              'Вы можете править вопросы кнопкой «⚠️ Сообщить об ошибке» под вопросом.')
-          )
-        : el('div', { class: 'muted small' },
-            'Если найдёте неточность в ответе или формулировке — нажмите «⚠️ Сообщить об ошибке» под вопросом, чтобы исправить.')
-    ));
-    const editActions = el('div', { class: 'patches-actions' },
-      overrideCount > 0
-        ? el('button', { onclick: () => App.renderPatchesList() }, '📋 Список правок')
-        : null,
-      el('button', {
-        disabled: overrideCount === 0,
-        onclick: () => PatchIO.exportFile(),
-      }, '💾 Экспорт'),
-      el('button', { onclick: () => PatchIO.importFile() }, '📥 Импорт'),
-    );
-    editBlock.appendChild(editActions);
-    this.root.appendChild(editBlock);
 
     if (totalAnswered > 0) {
       this.root.appendChild(el('div', { style: 'margin-top:32px;text-align:center;' },
@@ -1217,10 +1191,7 @@ const App = {
     // отсортируем по времени, новые сверху
     entries.sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0));
 
-    this.root.appendChild(el('div', { class: 'patches-actions', style: 'margin-top:16px;' },
-      el('button', { onclick: () => PatchIO.exportFile() }, '💾 Экспорт всех'),
-      el('button', { onclick: () => PatchIO.importFile() }, '📥 Импорт'),
-    ));
+
 
     const list = el('div', { class: 'topic-list', style: 'margin-top:16px;' });
     for (const [qid, patch] of entries) {
@@ -1538,24 +1509,7 @@ const Session = {
       }
     }
 
-    // Кнопка «Сообщить об ошибке» — открывает редактор вопроса.
-    // В экзамене показываем её ТОЛЬКО после проверки, чтобы не давать подсказку.
-    const showReportBtn = this.s.kind !== 'exam' || (this.ui && this.ui.checked);
-    if (showReportBtn) {
-      const editedBadge = q._edited
-        ? el('span', { class: 'edited-badge', title: 'Этот вопрос вы редактировали' }, '✏️ правлено вами')
-        : null;
-      const footer = el('div', { class: 'card-footer' },
-        editedBadge,
-        el('div', { class: 'card-footer-spacer' }),
-        el('button', {
-          class: 'btn-ghost btn-report',
-          onclick: () => Editor.open(q.id),
-          title: 'Открыть редактор: исправить текст, варианты или правильный ответ',
-        }, '⚠️ Сообщить об ошибке')
-      );
-      card.appendChild(footer);
-    }
+
 
     return card;
   },
@@ -1911,7 +1865,7 @@ const Editor = {
     ));
 
     modal.appendChild(el('div', { class: 'modal-hint' },
-      'Правки сохраняются только на этом устройстве. Через кнопку «Экспорт правок» на главной можно скачать JSON и поделиться им.'
+      'Правки сохраняются только на этом устройстве.'
     ));
 
     // Текст вопроса
