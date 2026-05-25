@@ -2182,47 +2182,55 @@ const PatchIO = {
 App.renderHome();
 
 
-/* CloudStorage — прогресс в Telegram Cloud */
+/* API Sync — прогресс через VPS (синхронизация с ботом) */
+const API_URL = 'https://gosbot.ddns.net';  // ← вставить домен/IP VPS с https://
+
 (function() {
-  const CS_KEY = 'gosexam_v2';
-  const _save = Store.save.bind(Store);
+  const tgUser   = tg?.initDataUnsafe?.user;
+  const initData = tg?.initData || '';
+
+  // Обёртка над Store.save — дополнительно шлём на API (fire-and-forget)
+  const _saveLocal = Store.save.bind(Store);
   Store.save = function() {
-    _save();
-    const cs = window.Telegram?.WebApp?.CloudStorage;
-    if (!cs) return;
-    try {
-      let payload = JSON.stringify({ a: Store.data.answers });
-      if (payload.length > 4096) {
-        const m = {};
-        for (const [id, v] of Object.entries(Store.data.answers))
-          m[id] = v.status === 'correct' ? 1 : 0;
-        payload = JSON.stringify({ m });
-      }
-      cs.setItem(CS_KEY, payload, () => {});
-    } catch(e) {}
+    _saveLocal();
+    if (!tgUser?.id || !initData || !API_URL.startsWith('https')) return;
+    fetch(`${API_URL}/progress/${tgUser.id}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': 'TgInitData ' + initData,
+      },
+      body: JSON.stringify({
+        answers:   Store.data.answers,
+        last_mode: Store.data.lastMode || null,
+      }),
+    }).catch(() => {});
   };
-  Store.loadFromCloud = function(cb) {
-    const cs = window.Telegram?.WebApp?.CloudStorage;
-    if (!cs) { cb(); return; }
-    cs.getItem(CS_KEY, (err, str) => {
-      if (!err && str) {
-        try {
-          const cloud = JSON.parse(str);
-          if (cloud.a) {
-            for (const [id, v] of Object.entries(cloud.a)) {
-              const loc = Store.data.answers[id];
-              if (!loc || (v.ts||0) > (loc.ts||0)) Store.data.answers[id] = v;
-            }
-          } else if (cloud.m) {
-            for (const [id, s] of Object.entries(cloud.m))
-              if (!Store.data.answers[id])
-                Store.data.answers[id] = { status: s ? 'correct' : 'wrong', given: [], ts: 0 };
+
+  // Загрузка прогресса с API при старте
+  Store.loadFromCloud = async function(cb) {
+    if (!tgUser?.id || !initData || !API_URL.startsWith('https')) { cb(); return; }
+    try {
+      const r = await fetch(`${API_URL}/progress/${tgUser.id}`, {
+        headers: { 'Authorization': 'TgInitData ' + initData },
+      });
+      if (r.ok) {
+        const data = await r.json();
+        // Мерж: побеждает более свежий timestamp
+        if (data.answers) {
+          for (const [id, v] of Object.entries(data.answers)) {
+            const loc = Store.data.answers[id];
+            if (!loc || (v.ts||0) > (loc.ts||0)) Store.data.answers[id] = v;
           }
-          Store.save();
-        } catch(e) {}
+        }
+        // Восстанавливаем позицию общего режима из API
+        if (data.last_mode && !Store.data.lastMode) {
+          Store.data.lastMode = data.last_mode;
+        }
+        _saveLocal();
       }
-      cb();
-    });
+    } catch(e) { console.warn('API sync error:', e); }
+    cb();
   };
 })();
 
