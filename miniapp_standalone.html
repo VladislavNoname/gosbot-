@@ -812,7 +812,28 @@ function _rebuildIndex() {
   QUESTIONS_BY_ID = new Map(QUESTIONS.map(q => [q.id, q]));
 }
 
+// ── Расшифровка вопросов (AES-256-GCM, Web Crypto API) ──────
+async function _deriveKey(userId) {
+  const enc     = new TextEncoder();
+  const secret  = enc.encode('gosbot_q_secret_2024_change_me'); // ← такой же как в api.py
+  const userStr = enc.encode(String(userId));
+  // HMAC-SHA256(secret, userId) → 32-байтовый AES ключ
+  const baseKey = await crypto.subtle.importKey('raw', secret, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const keyBits = await crypto.subtle.sign('HMAC', baseKey, userStr);
+  return crypto.subtle.importKey('raw', keyBits, { name: 'AES-GCM' }, false, ['decrypt']);
+}
+
+async function _decryptQuestions(b64payload, userId) {
+  const raw    = Uint8Array.from(atob(b64payload), c => c.charCodeAt(0));
+  const nonce  = raw.slice(0, 12);
+  const ct     = raw.slice(12);
+  const key    = await _deriveKey(userId);
+  const plain  = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, key, ct);
+  return JSON.parse(new TextDecoder().decode(plain));
+}
+
 async function loadQuestions() {
+  // Проверяем кэш (30 мин)
   try {
     const ts = parseInt(localStorage.getItem(Q_CACHE_TS) || '0');
     if (Date.now() - ts < Q_CACHE_TTL) {
@@ -824,9 +845,28 @@ async function loadQuestions() {
       }
     }
   } catch(e) {}
-  const r = await fetch(QUESTIONS_URL + '?t=' + Date.now());
-  if (!r.ok) throw new Error('HTTP ' + r.status);
-  QUESTIONS = await r.json();
+
+  const user     = tg?.initDataUnsafe?.user;
+  const initData = tg?.initData || '';
+  const useApi   = user?.id && initData && API_URL && !API_URL.includes('ВАШ_ДОМЕН') && API_URL.startsWith('https');
+
+  if (useApi) {
+    // Загружаем зашифрованные вопросы с API
+    const r = await fetch(`${API_URL}/questions`, {
+      headers: { 'Authorization': 'TgInitData ' + initData },
+    });
+    if (r.status === 403) throw new Error('ACCESS_DENIED');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const json = await r.json();
+    // Расшифровываем ключом привязанным к user_id
+    QUESTIONS = await _decryptQuestions(json.data, user.id);
+  } else {
+    // Fallback: открытая загрузка (без Telegram или без API)
+    const r = await fetch(QUESTIONS_URL + '?t=' + Date.now());
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    QUESTIONS = await r.json();
+  }
+
   _rebuildIndex();
   try {
     localStorage.setItem(Q_CACHE_KEY, JSON.stringify(QUESTIONS));
@@ -2301,8 +2341,12 @@ async function boot() {
       App.renderHome();
     }, 350);
   } catch(e) {
-    ltext.innerHTML = '⚠️ Ошибка загрузки<br><small style="color:#888">' + e.message + '</small><br><br>'
-      + '<button onclick="boot()" style="padding:10px 20px;border-radius:8px;background:#6ba4ff;color:#fff;border:none;font-size:14px;cursor:pointer;">Повторить</button>';
+    if (e.message === 'ACCESS_DENIED') {
+      showNoAccess(loader, ltext);
+    } else {
+      ltext.innerHTML = '⚠️ Ошибка загрузки<br><small style="color:#888">' + e.message + '</small><br><br>'
+        + '<button onclick="boot()" style="padding:10px 20px;border-radius:8px;background:#6ba4ff;color:#fff;border:none;font-size:14px;cursor:pointer;">Повторить</button>';
+    }
   }
 }
 boot();
