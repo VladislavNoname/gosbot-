@@ -1122,7 +1122,7 @@ const App = {
         el('button', { class: 'btn-ghost', onclick: () => {
           if (confirm('Точно сбросить весь прогресс? Это действие необратимо.')) {
             Store.resetAll();
-            App.renderHome();
+            location.reload();
           }
         }}, 'Сбросить весь прогресс')
       ));
