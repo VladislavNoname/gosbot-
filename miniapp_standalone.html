@@ -1136,12 +1136,12 @@ const App = {
     this.root.appendChild(el('div', { class: 'mode-grid' },
       el('button', { class: 'mode-card', onclick: () => Mode.startAll() },
         el('div', { class: 'mode-card-icon' }, '📖'),
-        el('div', { class: 'mode-card-title' }, 'Общий режим'),
+        el('div', { class: 'mode-card-title' }, 'Марафон вопросов'),
         el('div', { class: 'mode-card-desc' }, `Все ${QUESTIONS.length} вопросов по порядку. Прогресс сохраняется автоматически — можно вернуться в любой момент.`)
       ),
       el('button', { class: 'mode-card', onclick: () => Mode.startExam() },
         el('div', { class: 'mode-card-icon' }, '🎯'),
-        el('div', { class: 'mode-card-title' }, '40 случайных (экзамен)'),
+        el('div', { class: 'mode-card-title' }, 'Экзамен из 40 случайных вопросов'),
         el('div', { class: 'mode-card-desc' }, 'Имитация экзамена: 40 случайных вопросов, ответы проверяются в конце, итоговая оценка как в реальном тесте.')
       ),
       el('button', { class: 'mode-card', onclick: () => App.renderTopics() },
@@ -1291,13 +1291,20 @@ function renderProgressNum(stats) {
    Режимы
    ========================================================= */
 const Mode = {
-  // Общий режим: все вопросы по порядку, прогресс сохраняется в lastMode
-  // Находит индекс первого неотвеченного вопроса в массиве id
+  // Марафон вопросов: все вопросы по порядку, прогресс сохраняется в lastMode
   _firstUnanswered(order) {
     for (let i = 0; i < order.length; i++) {
       if (!Store.getAnswer(order[i])) return i;
     }
-    return 0; // все отвечены — начинаем с начала
+    return 0;
+  },
+
+  _firstUnanswered(order) {
+    // Первый вопрос без ответа; если все отвечены — с начала
+    for (let i = 0; i < order.length; i++) {
+      if (!Store.getAnswer(order[i])) return i;
+    }
+    return 0;
   },
 
   startAll() {
@@ -1305,7 +1312,7 @@ const Mode = {
     const startIdx = this._firstUnanswered(order);
     const session = {
       kind: 'practice',
-      title: 'Общий режим',
+      title: 'Марафон вопросов',
       order,
       currentIndex: startIdx,
       saveAsLastMode: 'all',
@@ -1316,16 +1323,16 @@ const Mode = {
 
   resumeAll() {
     const lm = Store.data.lastMode;
-    if (!lm) return App.goHome();
+    if (!lm) return this.startAll();
     // Ищем первый неотвеченный начиная с сохранённой позиции
-    const savedIdx = lm.currentIndex || 0;
-    let startIdx = savedIdx;
-    for (let i = savedIdx; i < lm.order.length; i++) {
+    const saved = lm.currentIndex || 0;
+    let startIdx = saved;
+    for (let i = saved; i < lm.order.length; i++) {
       if (!Store.getAnswer(lm.order[i])) { startIdx = i; break; }
     }
     Session.start({
       kind: 'practice',
-      title: 'Общий режим',
+      title: 'Марафон вопросов',
       order: lm.order,
       currentIndex: startIdx,
       saveAsLastMode: 'all',
@@ -1337,7 +1344,7 @@ const Mode = {
     const ids = shuffle(QUESTIONS.map(q => q.id)).slice(0, Math.min(40, QUESTIONS.length));
     Session.start({
       kind: 'exam',
-      title: 'Экзамен (40 вопросов)',
+      title: 'Экзамен из 40 случайных вопросов',
       order: ids,
       currentIndex: 0,
     });
@@ -1346,7 +1353,7 @@ const Mode = {
   // Произвольный сабсет — режим практики
   startSubset(questions, title, freshStart = false) {
     const order = questions.map(q => q.id);
-    // В freshStart (работа над ошибками) всегда с начала
+    // freshStart (работа над ошибками) — всегда с 0; иначе — первый неотвеченный
     const startIdx = freshStart ? 0 : this._firstUnanswered(order);
     Session.start({
       kind: 'practice',
