@@ -1182,7 +1182,7 @@ const App = {
       alert('Ошибок пока нет 🎉');
       return;
     }
-    Mode.startSubset(errorQs, `Работа над ошибками (${errorQs.length})`);
+    Mode.startSubset(errorQs, `Работа над ошибками (${errorQs.length})`, true);
   },
 
   renderPatchesList() {
@@ -1289,13 +1289,14 @@ const Mode = {
   },
 
   // Произвольный сабсет — режим практики
-  startSubset(questions, title) {
+  startSubset(questions, title, freshStart = false) {
     const order = questions.map(q => q.id);
     Session.start({
       kind: 'practice',
       title,
       order,
       currentIndex: 0,
+      freshStart,
     });
   },
 };
@@ -1382,9 +1383,10 @@ const Session = {
     const q = this.currentQuestion();
     App.topMeta.textContent = `${this.s.title} · ${this.s.currentIndex + 1} / ${this.s.order.length}`;
 
-    // Если на этот вопрос уже отвечали в прошлом, восстановим состояние
-    // (важно для возврата «Назад» и для палитры — чтобы видно было результат).
-    if (!this.ui) {
+    // Восстанавливаем состояние вопроса, если уже отвечали.
+    // В режиме freshStart (работа над ошибками) — не восстанавливаем,
+    // чтобы пользователь мог ответить заново.
+    if (!this.ui && !this.s.freshStart) {
       const stored = Store.getAnswer(q.id);
       if (stored) {
         this.ui = this.uiFromStored(q, stored);
