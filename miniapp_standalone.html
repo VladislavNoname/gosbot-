@@ -806,19 +806,28 @@ let QUESTIONS = [];
 const QUESTIONS_URL = 'https://raw.githubusercontent.com/VladislavNoname/gosbot-/main/questions_miniapp.json';
 const Q_CACHE_KEY = 'gosexam_q_cache_v1';
 const Q_CACHE_TS  = 'gosexam_q_cache_ts';
-const Q_CACHE_TTL = 5 * 60 * 1000;
+const Q_CACHE_TTL = 30 * 60 * 1000;  // 30 мин кэш
+
+function _rebuildIndex() {
+  QUESTIONS_BY_ID = new Map(QUESTIONS.map(q => [q.id, q]));
+}
 
 async function loadQuestions() {
   try {
     const ts = parseInt(localStorage.getItem(Q_CACHE_TS) || '0');
     if (Date.now() - ts < Q_CACHE_TTL) {
       const cached = localStorage.getItem(Q_CACHE_KEY);
-      if (cached) { QUESTIONS = JSON.parse(cached); return; }
+      if (cached) {
+        QUESTIONS = JSON.parse(cached);
+        _rebuildIndex();
+        return;
+      }
     }
   } catch(e) {}
   const r = await fetch(QUESTIONS_URL + '?t=' + Date.now());
   if (!r.ok) throw new Error('HTTP ' + r.status);
   QUESTIONS = await r.json();
+  _rebuildIndex();
   try {
     localStorage.setItem(Q_CACHE_KEY, JSON.stringify(QUESTIONS));
     localStorage.setItem(Q_CACHE_TS, String(Date.now()));
@@ -903,7 +912,7 @@ const Store = {
 Store.load();
 
 /* ---------- Доступ к вопросам с учётом пользовательских правок ---------- */
-const QUESTIONS_BY_ID = new Map(QUESTIONS.map(q => [q.id, q]));
+let QUESTIONS_BY_ID = new Map(); // заполняется после loadQuestions()
 // Возвращает «эффективную» версию вопроса: оригинал + применённый override
 function getQuestion(id) {
   const base = QUESTIONS_BY_ID.get(id);
