@@ -815,7 +815,7 @@ function _rebuildIndex() {
 // ── Расшифровка вопросов (AES-256-GCM, Web Crypto API) ──────
 async function _deriveKey(userId) {
   const enc     = new TextEncoder();
-  const secret  = enc.encode('gosbot_q_secret_2024_change_me'); // ← такой же как в api.py
+  const secret  = enc.encode('gosbot_q_secret_2024'); // ← такой же как в api.py
   const userStr = enc.encode(String(userId));
   // HMAC-SHA256(secret, userId) → 32-байтовый AES ключ
   const baseKey = await crypto.subtle.importKey('raw', secret, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
