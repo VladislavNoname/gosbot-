@@ -815,7 +815,7 @@ function _rebuildIndex() {
 // ── Расшифровка вопросов (AES-256-GCM, Web Crypto API) ──────
 async function _deriveKey(userId) {
   const enc     = new TextEncoder();
-  const secret  = enc.encode('gosbot_q_secret_2024'); // ← такой же как в api.py
+  const secret  = enc.encode('gosbot_q_secret_2024_change_me'); // ← такой же как в api.py
   const userStr = enc.encode(String(userId));
   // HMAC-SHA256(secret, userId) → 32-байтовый AES ключ
   const baseKey = await crypto.subtle.importKey('raw', secret, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
@@ -1292,27 +1292,42 @@ function renderProgressNum(stats) {
    ========================================================= */
 const Mode = {
   // Общий режим: все вопросы по порядку, прогресс сохраняется в lastMode
+  // Находит индекс первого неотвеченного вопроса в массиве id
+  _firstUnanswered(order) {
+    for (let i = 0; i < order.length; i++) {
+      if (!Store.getAnswer(order[i])) return i;
+    }
+    return 0; // все отвечены — начинаем с начала
+  },
+
   startAll() {
     const order = QUESTIONS.map(q => q.id);
+    const startIdx = this._firstUnanswered(order);
     const session = {
-      kind: 'practice',     // practice = по одному с моментальной проверкой
+      kind: 'practice',
       title: 'Общий режим',
       order,
-      currentIndex: 0,
+      currentIndex: startIdx,
       saveAsLastMode: 'all',
     };
-    Store.setLastMode({ type: 'all', currentIndex: 0, order });
+    Store.setLastMode({ type: 'all', currentIndex: startIdx, order });
     Session.start(session);
   },
 
   resumeAll() {
     const lm = Store.data.lastMode;
     if (!lm) return App.goHome();
+    // Ищем первый неотвеченный начиная с сохранённой позиции
+    const savedIdx = lm.currentIndex || 0;
+    let startIdx = savedIdx;
+    for (let i = savedIdx; i < lm.order.length; i++) {
+      if (!Store.getAnswer(lm.order[i])) { startIdx = i; break; }
+    }
     Session.start({
       kind: 'practice',
       title: 'Общий режим',
       order: lm.order,
-      currentIndex: lm.currentIndex || 0,
+      currentIndex: startIdx,
       saveAsLastMode: 'all',
     });
   },
@@ -1331,11 +1346,13 @@ const Mode = {
   // Произвольный сабсет — режим практики
   startSubset(questions, title, freshStart = false) {
     const order = questions.map(q => q.id);
+    // В freshStart (работа над ошибками) всегда с начала
+    const startIdx = freshStart ? 0 : this._firstUnanswered(order);
     Session.start({
       kind: 'practice',
       title,
       order,
-      currentIndex: 0,
+      currentIndex: startIdx,
       freshStart,
     });
   },
