@@ -1024,7 +1024,7 @@ function checkAnswer(q, given) {
     const correctOrder = q.sequence.map(s => s.text);
     return arraysEqual(given, correctOrder) ? 'correct' : 'wrong';
   }
-  if (q.type === 'multi') {
+  if (q.type === 'multi' || q.type === 'multiple') {
     const correctSet = new Set(q.options.filter(o => o.correct).map(o => o.text));
     const givenSet = new Set(given);
     return setsEqual(correctSet, givenSet) ? 'correct' : 'wrong';
@@ -1182,7 +1182,7 @@ const App = {
       alert('Ошибок пока нет 🎉');
       return;
     }
-    Mode.startSubset(errorQs, `Работа над ошибками (${errorQs.length})`, true);
+    Mode.startSubset(errorQs, `Работа над ошибками (${errorQs.length})`);
   },
 
   renderPatchesList() {
@@ -1328,7 +1328,7 @@ const Session = {
       ui.order = Array.isArray(stored.given) ? stored.given.slice() : q.sequence.map(s => s.text);
       const correctOrder = q.sequence.map(s => s.text);
       ui.correctnessByIndex = ui.order.map((t, i) => t === correctOrder[i]);
-    } else if (q.type === 'multi') {
+    } else if (q.type === 'multi' || q.type === 'multiple') {
       ui.type = 'multi';
       const givenTexts = new Set(Array.isArray(stored.given) ? stored.given : []);
       ui.chosen = new Set();
@@ -1383,9 +1383,8 @@ const Session = {
     const q = this.currentQuestion();
     App.topMeta.textContent = `${this.s.title} · ${this.s.currentIndex + 1} / ${this.s.order.length}`;
 
-    // Восстанавливаем состояние вопроса, если уже отвечали.
-    // В режиме freshStart (работа над ошибками) — не восстанавливаем,
-    // чтобы пользователь мог ответить заново.
+    // Если на этот вопрос уже отвечали в прошлом, восстановим состояние
+    // (важно для возврата «Назад» и для палитры — чтобы видно было результат).
     if (!this.ui && !this.s.freshStart) {
       const stored = Store.getAnswer(q.id);
       if (stored) {
@@ -1478,7 +1477,7 @@ const Session = {
     // Метаданные / теги
     const meta = el('div', { class: 'question-meta' });
     const tagsLeft = el('div', {});
-    if (q.type === 'multi') tagsLeft.appendChild(el('span', { class: 'question-tag multi' }, 'несколько ответов'));
+    if (q.type === 'multi' || q.type === 'multiple') tagsLeft.appendChild(el('span', { class: 'question-tag multi' }, 'несколько ответов'));
     else if (q.type === 'calc') tagsLeft.appendChild(el('span', { class: 'question-tag calc' }, '🔢 расчёт'));
     else if (q.type === 'sequence') tagsLeft.appendChild(el('span', { class: 'question-tag seq' }, 'последовательность'));
     else tagsLeft.appendChild(el('span', { class: 'question-tag' }, 'один ответ'));
@@ -1497,7 +1496,7 @@ const Session = {
     // Варианты — отдельная функция по типу
     if (q.type === 'sequence') {
       card.appendChild(this.renderSequence(q));
-    } else if (q.type === 'multi') {
+    } else if (q.type === 'multi' || q.type === 'multiple') {
       card.appendChild(this.renderMulti(q));
     } else {
       card.appendChild(this.renderSingle(q));
@@ -1554,7 +1553,7 @@ const Session = {
   /* ---- multi ---- */
   renderMulti(q) {
     const wrap = el('div', { class: 'options' });
-    if (!this.ui) this.ui = { type: 'multi', chosen: new Set(), checked: false };
+    if (!this.ui) this.ui = { type: 'multi', chosen: new Set(), checked: false }; // multi/multiple
     q.options.forEach((opt, idx) => {
       const classes = ['option'];
       const isSel = this.ui.chosen.has(idx);
@@ -1685,7 +1684,7 @@ const Session = {
       const correctOrder = q.sequence.map(s => s.text);
       status = arraysEqual(given, correctOrder) ? 'correct' : 'wrong';
       this.ui.correctnessByIndex = given.map((t, i) => t === correctOrder[i]);
-    } else if (q.type === 'multi') {
+    } else if (q.type === 'multi' || q.type === 'multiple') {
       if (this.ui.chosen.size === 0) {
         alert('Выберите хотя бы один вариант');
         return;
@@ -1785,7 +1784,7 @@ const Session = {
           if (o.correct) classes.push('reveal-correct');
           if (userPicked && !o.correct) classes.push('wrong');
           opts.appendChild(el('div', { class: classes.join(' ') },
-            el('div', { class: 'option-marker' + (r.q.type === 'multi' ? ' square' : '') }),
+            el('div', { class: 'option-marker' + ((r.q.type === 'multi' || r.q.type === 'multiple') ? ' square' : '') }),
             el('div', { class: 'option-text' }, o.text)
           ));
         });
@@ -1936,7 +1935,7 @@ const Editor = {
   renderOptionsEditor(d) {
     const section = el('div', { class: 'modal-section' });
     section.appendChild(el('div', { class: 'modal-label' },
-      d.type === 'multi' ? 'Варианты (нажмите ✓ чтобы отметить правильные — можно несколько)' :
+      (d.type === 'multi' || d.type === 'multiple') ? 'Варианты (нажмите ✓ чтобы отметить правильные — можно несколько)' :
       'Варианты (нажмите ✓ чтобы выбрать правильный)'));
 
     const list = el('div', {});
