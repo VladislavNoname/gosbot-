@@ -1278,7 +1278,7 @@ const Mode = {
   },
 
   startAll() {
-    const order = QUESTIONS.map(q => q.id);
+    const order = shuffle(QUESTIONS.map(q => q.id));
     const startIdx = this._firstUnanswered(order);
     const session = {
       kind: 'practice',
@@ -1287,7 +1287,7 @@ const Mode = {
       currentIndex: startIdx,
       saveAsLastMode: 'all',
     };
-    Store.setLastMode({ type: 'all', currentIndex: startIdx, order });
+    Store.setLastMode({ type: 'all', currentIndex: startIdx, order, ts: Date.now() });
     Session.start(session);
   },
 
@@ -1409,7 +1409,7 @@ const Session = {
 
   persistLast() {
     if (this.s.saveAsLastMode === 'all') {
-      Store.setLastMode({ type: 'all', currentIndex: this.s.currentIndex, order: this.s.order });
+      Store.setLastMode({ type: 'all', currentIndex: this.s.currentIndex, order: this.s.order, ts: Date.now() });
     }
   },
 
@@ -2279,11 +2279,16 @@ Store.loadFromCloud = async function(cb) {
     const resetAt     = data.reset_at || 0;
     const localSaveTs = parseInt(localStorage.getItem('gosexam_last_save_ts') || '0');
 
-    if (resetAt > 0 && resetAt > localSaveTs) {
+    // Сброс: либо по reset_at, либо если API вернул полностью пустой прогресс
+    const apiIsEmpty   = Object.keys(data.answers || {}).length === 0 && !data.last_mode;
+    const resetByTime  = resetAt > 0 && resetAt > localSaveTs;
+    const localHasData = Object.keys(Store.data.answers || {}).length > 0 || Store.data.lastMode;
+
+    if (resetByTime || (apiIsEmpty && localHasData && resetAt > 0)) {
       Store.data = { answers: {}, lastMode: null, overrides: Store.data.overrides || {} };
       _saveLocal();
-      localStorage.setItem('gosexam_last_save_ts', String(resetAt));
-      console.log('[API] прогресс сброшен по команде бота');
+      localStorage.removeItem('gosexam_last_save_ts');
+      console.log('[API] прогресс сброшен (resetAt=' + resetAt + ', byTime=' + resetByTime + ')');
     } else {
       // Мерж: обе стороны, побеждает более новый ts
       const merged = { ...(Store.data.answers || {}) };
