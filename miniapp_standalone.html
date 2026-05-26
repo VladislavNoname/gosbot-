@@ -2264,70 +2264,58 @@ async function _apiFetch(path, options = {}) {
 const _saveLocal = Store.save.bind(Store);
 Store.save = function() {
   _saveLocal();
-  const now = Date.now();
-  localStorage.setItem('gosexam_last_save_ts', String(now));
+  localStorage.setItem('gosexam_last_save_ts', String(Date.now()));
   const auth = _apiAuth();
   if (!auth) return;
-  // Добавляем ts к lastMode чтобы при мерже побеждала более свежая версия
-  const lastModeWithTs = Store.data.lastMode
-    ? { ...Store.data.lastMode, ts: now }
-    : null;
+  // Сохраняем на сервер — любой ответ игнорируем (fire-and-forget)
   _apiFetch(`/progress/${auth.userId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       answers:   Store.data.answers,
-      last_mode: lastModeWithTs,
+      last_mode: Store.data.lastMode || null,
     }),
-  }).then(r => {
-    if (r) console.log('[API] сохранено, ответов:', Object.keys(Store.data.answers).length);
   });
 };
 
 // Загрузка прогресса с API при старте (мерж с localStorage)
 Store.loadFromCloud = async function(cb) {
-  const auth = _apiAuth();
-  if (!auth) {
-    console.warn('[API] нет авторизации — используем только localStorage');
-    cb(); return;
-  }
+  try {
+    const auth = _apiAuth();
+    if (!auth) { cb(); return; }
 
-  const r = await _apiFetch(`/progress/${auth.userId}`);
-  if (!r) {
-    console.warn('[API] сервер недоступен — используем localStorage');
-    cb(); return;
-  }
+    const r = await _apiFetch(`/progress/${auth.userId}`);
+    if (!r) { cb(); return; }
 
-  const data = await r.json();
-  const resetAt     = data.reset_at || 0;
-  const localSaveTs = parseInt(localStorage.getItem('gosexam_last_save_ts') || '0');
+    const data = await r.json();
+    const resetAt     = data.reset_at || 0;
+    const localSaveTs = parseInt(localStorage.getItem('gosexam_last_save_ts') || '0');
 
-  if (resetAt > 0 && resetAt > localSaveTs) {
-    // Бот сбросил прогресс
-    Store.data = { answers: {}, lastMode: null, overrides: Store.data.overrides || {} };
-    _saveLocal();
-    localStorage.setItem('gosexam_last_save_ts', String(resetAt));
-    console.log('[API] прогресс сброшен по команде бота');
-  } else {
-    // API — источник правды: мержим обе стороны, побеждает более новый ts
-    const apiAnswers = data.answers || {};
-    const localAnswers = Store.data.answers || {};
-    const merged = { ...localAnswers };
-    for (const [id, v] of Object.entries(apiAnswers)) {
-      const loc = merged[id];
-      if (!loc || (v.ts||0) >= (loc.ts||0)) merged[id] = v;
+    if (resetAt > 0 && resetAt > localSaveTs) {
+      Store.data = { answers: {}, lastMode: null, overrides: Store.data.overrides || {} };
+      _saveLocal();
+      localStorage.setItem('gosexam_last_save_ts', String(resetAt));
+      console.log('[API] прогресс сброшен по команде бота');
+    } else {
+      // Мерж: обе стороны, побеждает более новый ts
+      const merged = { ...(Store.data.answers || {}) };
+      for (const [id, v] of Object.entries(data.answers || {})) {
+        const loc = merged[id];
+        if (!loc || (v.ts||0) >= (loc.ts||0)) merged[id] = v;
+      }
+      Store.data.answers = merged;
+      if (data.last_mode) {
+        const apiTs = data.last_mode.ts || 0;
+        const locTs = Store.data.lastMode?.ts || 0;
+        if (apiTs >= locTs) Store.data.lastMode = data.last_mode;
+      }
+      _saveLocal();
+      console.log('[API] синхронизировано, ответов:', Object.keys(Store.data.answers).length);
     }
-    Store.data.answers = merged;
-    // lastMode: берём из API если он новее или локального нет
-    if (data.last_mode) {
-      const apiTs = data.last_mode.ts || 0;
-      const locTs = Store.data.lastMode?.ts || 0;
-      if (apiTs >= locTs) Store.data.lastMode = data.last_mode;
-    }
-    _saveLocal();
-    console.log('[API] прогресс синхронизирован, ответов:', Object.keys(Store.data.answers).length);
+  } catch(e) {
+    console.warn('[API] loadFromCloud ошибка:', e);
   }
-  cb();
+  cb();  // всегда вызываем cb() даже при ошибке
 };
 
 // Сброс прогресса — чистим и API тоже
