@@ -1345,6 +1345,9 @@ const Mode = {
   resumeAll() {
     const lm = Store.data.lastMode;
     if (!lm) return this.startAll();
+    // Если нет ни одного ответа (после сброса) → startAll с перемешиванием
+    const hasAnyAnswer = lm.order && lm.order.some(id => Store.getAnswer(id));
+    if (!hasAnyAnswer) return this.startAll();
     // Ищем первый неотвеченный начиная с сохранённой позиции
     const saved = lm.currentIndex || 0;
     let startIdx = saved;
@@ -1423,6 +1426,12 @@ const Session = {
   start(session) {
     this.s = session;
     this.ui = null;
+    // Запускаем таймер сразу при старте/восстановлении экзамена
+    if (session.kind === 'exam' && session.startedAt) {
+      startExamTimer(session.startedAt);
+    } else {
+      clearExamTimer();
+    }
     this.renderCurrent();
   },
 
@@ -2365,19 +2374,18 @@ Store.loadFromCloud = async function(cb) {
     if (!r) { cb(); return; }
 
     const data = await r.json();
-    const resetAt     = data.reset_at || 0;
-    const localSaveTs = parseInt(localStorage.getItem('gosexam_last_save_ts') || '0');
+    const resetAt      = data.reset_at || 0;
+    // Надёжное определение сброса: сравниваем reset_at с последним обработанным
+    // Не зависит от часового пояса, работает всегда
+    const lastResetAt  = parseInt(localStorage.getItem('gosexam_last_reset_at') || '0');
+    const isNewReset   = resetAt > 0 && resetAt !== lastResetAt;
 
-    // Сброс: либо по reset_at, либо если API вернул полностью пустой прогресс
-    const apiIsEmpty   = Object.keys(data.answers || {}).length === 0 && !data.last_mode;
-    const resetByTime  = resetAt > 0 && resetAt > localSaveTs;
-    const localHasData = Object.keys(Store.data.answers || {}).length > 0 || Store.data.lastMode;
-
-    if (resetByTime || (apiIsEmpty && localHasData && resetAt > 0)) {
+    if (isNewReset) {
       Store.data = { answers: {}, lastMode: null, overrides: Store.data.overrides || {} };
       _saveLocal();
+      localStorage.setItem('gosexam_last_reset_at', String(resetAt));
       localStorage.removeItem('gosexam_last_save_ts');
-      console.log('[API] прогресс сброшен (resetAt=' + resetAt + ', byTime=' + resetByTime + ')');
+      console.log('[API] прогресс сброшен, reset_at=' + resetAt);
     } else {
       // Мерж: обе стороны, побеждает более новый ts
       const merged = { ...(Store.data.answers || {}) };
