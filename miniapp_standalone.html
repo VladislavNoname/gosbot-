@@ -308,6 +308,9 @@
     border-radius: 8px;
     margin-bottom: 16px;
     border: 1px solid var(--border);
+    background: #fff;
+    padding: 6px;
+    display: block;
   }
 
   /* ====== Варианты ответов ====== */
@@ -807,6 +810,18 @@ const QUESTIONS_URL = 'https://raw.githubusercontent.com/VladislavNoname/gosbot-
 const Q_CACHE_KEY = 'gosexam_q_cache_v2';
 const Q_CACHE_TS  = 'gosexam_q_cache_ts';
 const Q_CACHE_TTL = 30 * 60 * 1000;  // 30 мин кэш
+
+// Базовый URL папки с картинками вопросов.
+// Картинки лежат рядом с miniapp_standalone.html в подпапке images/.
+// Используем относительный путь — он сработает и на GitHub Pages, и при локальном
+// хостинге, и в Telegram WebView.
+const IMAGES_BASE_URL = 'images/';
+function imageUrl(name) {
+  if (!name) return '';
+  // Если уже абсолютный URL — возвращаем как есть
+  if (/^https?:/.test(name)) return name;
+  return IMAGES_BASE_URL + name;
+}
 
 function _rebuildIndex() {
   QUESTIONS_BY_ID = new Map(QUESTIONS.map(q => [q.id, q]));
@@ -1833,7 +1848,12 @@ const Session = {
 
     // Картинка (если будет)
     if (q.image) {
-      card.appendChild(el('img', { class: 'question-image', src: q.image, alt: '' }));
+      card.appendChild(el('img', {
+        class: 'question-image',
+        src: imageUrl(q.image),
+        alt: '',
+        loading: 'lazy',
+      }));
     }
 
     // Текст вопроса
@@ -2212,6 +2232,12 @@ const Session = {
         ),
         el('span', { class: 'muted small' }, `#${r.q.id}`)
       ));
+      if (r.q.image) {
+        card.appendChild(el('img', {
+          class: 'question-image', src: imageUrl(r.q.image), alt: '', loading: 'lazy',
+          style: 'max-width:100%;margin-bottom:8px;'
+        }));
+      }
       card.appendChild(el('div', { class: 'question-text', style: 'font-size:14px;' }, r.q.text));
 
       // показать правильные варианты
