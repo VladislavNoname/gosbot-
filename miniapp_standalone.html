@@ -1276,7 +1276,7 @@ const Mode = {
   },
 
   startAll() {
-    const order = QUESTIONS.map(q => q.id);
+    const order = shuffle(QUESTIONS.map(q => q.id));
     const startIdx = this._firstUnanswered(order);
     const session = {
       kind: 'practice',
