@@ -1134,16 +1134,7 @@ const App = {
     ));
 
 
-    if (totalAnswered > 0) {
-      this.root.appendChild(el('div', { style: 'margin-top:32px;text-align:center;' },
-        el('button', { class: 'btn-ghost', onclick: () => {
-          if (confirm('Точно сбросить весь прогресс? Это действие необратимо.')) {
-            Store.resetWithApi();
-            location.reload();
-          }
-        }}, 'Сбросить весь прогресс')
-      ));
-    }
+
   },
 
   renderTopics() {
@@ -1860,12 +1851,7 @@ const Session = {
     ));
     App.root.appendChild(el('div', { class: 'nav-bar' },
       el('button', { class: 'btn-primary', onclick: () => App.goHome() }, '← В меню'),
-      this.s.saveAsLastMode === 'all' ? el('button', { onclick: () => {
-        if (confirm('Сбросить прогресс по общему режиму?')) {
-          Store.clearLastMode();
-          App.goHome();
-        }
-      }}, 'Сбросить общий прогресс') : null
+      null
     ));
   }
 };
