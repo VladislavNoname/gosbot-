@@ -530,19 +530,19 @@
     "text": "Чтобы проект считался инвестиционно привлекательным, простые показатели должны быть, соответственно:",
     "options": [
       {
-        "text": "NV&gt;0, PB&gt;T, PI&gt;1",
+        "text": "NV>0, PB>T, PI>1",
         "correct": false
       },
       {
-        "text": "NV&lt;0, PB&gt;T, PI&lt;1",
+        "text": "NV<0, PB>T, PI<1",
         "correct": false
       },
       {
-        "text": "NV&gt;0, PB&lt;T, PI&gt;1 (NV&gt;0, PB1)",
+        "text": "NV>0, PB<T, PI>1  (NV>0, PB1)",
         "correct": true
       },
       {
-        "text": "NV&lt;0, PB&gt;T, PI&gt;1",
+        "text": "NV<0, PB>T, PI>1",
         "correct": false
       }
     ],
