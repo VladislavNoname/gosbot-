@@ -928,6 +928,46 @@ const Store = {
 };
 Store.load();
 
+/* ---------- История экзаменов ----------
+   Локальный кэш в localStorage + синхронизация с /exam-history/{userId}.
+   Каждая запись: { started_at, finished_at, total, correct, duration_ms, details: { sections: [...] } }
+   Идентификатор записи — started_at (он же UNIQUE на сервере).
+*/
+const EXAM_HISTORY_KEY = 'gosexam_history_v1';
+const ExamHistory = {
+  _items: [],
+  load() {
+    try {
+      const raw = localStorage.getItem(EXAM_HISTORY_KEY);
+      this._items = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(this._items)) this._items = [];
+    } catch (e) { this._items = []; }
+  },
+  _save() {
+    try { localStorage.setItem(EXAM_HISTORY_KEY, JSON.stringify(this._items)); }
+    catch (e) { console.warn('Не удалось сохранить историю экзаменов:', e); }
+  },
+  all() { return this._items.slice().sort((a, b) => b.finished_at - a.finished_at); },
+  add(attempt) {
+    // Дедуп по started_at — та же логика, что и в API
+    const existing = this._items.find(x => x.started_at === attempt.started_at);
+    if (existing) return false;
+    this._items.push(attempt);
+    this._save();
+    return true;
+  },
+  replaceAll(items) {
+    this._items = Array.isArray(items) ? items.slice() : [];
+    this._save();
+  },
+  clear() {
+    this._items = [];
+    this._save();
+  },
+  count() { return this._items.length; },
+};
+ExamHistory.load();
+
 /* ---------- Доступ к вопросам с учётом пользовательских правок ---------- */
 let QUESTIONS_BY_ID = new Map(); // заполняется после loadQuestions()
 // Возвращает «эффективную» версию вопроса: оригинал + применённый override
@@ -1114,7 +1154,7 @@ const App = {
       this.root.appendChild(el('div', { class: 'question-card', style: 'margin-bottom:18px;' },
         el('div', { class: 'row between' },
           el('div', {},
-            el('div', { style: 'font-weight:600;margin-bottom:4px;' }, '📌 Продолжить общий1 режим'),
+            el('div', { style: 'font-weight:600;margin-bottom:4px;' }, '📌 Продолжить марафон'),
             el('div', { class: 'muted small' }, `Остановились на вопросе ${lm.currentIndex + 1} из ${lm.order.length}`)
           ),
           el('button', { class: 'btn-primary', onclick: () => Mode.resumeAll() }, 'Продолжить')
@@ -1206,6 +1246,11 @@ const App = {
         el('div', { class: 'mode-card-title' }, 'Работа над ошибками'),
         el('div', { class: 'mode-card-desc' }, 'Повторите только те вопросы, в которых ошиблись.')
       ),
+      el('button', { class: 'mode-card', onclick: () => App.renderExamHistory() },
+        el('div', { class: 'mode-card-icon' }, '📜'),
+        el('div', { class: 'mode-card-title' }, `История экзаменов${ExamHistory.count() ? ` (${ExamHistory.count()})` : ''}`),
+        el('div', { class: 'mode-card-desc' }, 'Список ваших решённых экзаменов: дата, результат, в каких разделах были ошибки.')
+      ),
     ));
 
 
@@ -1266,6 +1311,99 @@ const App = {
       return;
     }
     Mode.startSubset(errorQs, `Работа над ошибками (${errorQs.length})`, true);
+  },
+
+  renderExamHistory() {
+    this.topMeta.textContent = 'История экзаменов';
+    this.root.innerHTML = '';
+    this.root.appendChild(el('button', { class: 'btn-ghost', onclick: () => App.goHome() }, '← К меню'));
+
+    const items = ExamHistory.all();
+
+    // Шапка с кнопкой очистки
+    const headerRow = el('div', { class: 'row between', style: 'margin:16px 0 8px;' },
+      el('h2', { style: 'margin:0;' }, `Решённые экзамены: ${items.length}`),
+      items.length > 0
+        ? el('button', { class: 'btn-ghost', style: 'color:var(--wrong);',
+            onclick: () => {
+              if (!confirm('Очистить всю историю экзаменов? Основной прогресс (ответы по вопросам) останется.')) return;
+              clearExamHistoryWithApi();
+              App.renderExamHistory();
+            }
+          }, '🗑 Очистить историю')
+        : null
+    );
+    this.root.appendChild(headerRow);
+
+    if (items.length === 0) {
+      this.root.appendChild(el('div', { class: 'question-card', style: 'margin-top:8px;' },
+        el('div', { class: 'muted' }, 'Здесь будут появляться ваши решённые экзамены. Завершите экзамен — и попытка попадёт сюда.')
+      ));
+      return;
+    }
+
+    const fmtDate = ts => {
+      const d = new Date(ts);
+      const pad = n => String(n).padStart(2, '0');
+      return `${pad(d.getDate())}.${pad(d.getMonth()+1)}.${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    };
+    const fmtDuration = ms => {
+      const total = Math.max(0, Math.floor(ms / 1000));
+      const m = Math.floor(total / 60);
+      const s = total % 60;
+      return `${m} мин ${s} с`;
+    };
+
+    const list = el('div', { class: 'topic-list' });
+    items.forEach((attempt) => {
+      const total   = attempt.total || 0;
+      const correct = attempt.correct || 0;
+      const pct     = total ? Math.round(correct / total * 100) : 0;
+      let grade, gradeClass;
+      if (pct >= 85) { grade = 'Отлично'; gradeClass = 'grade-otl'; }
+      else if (pct >= 75) { grade = 'Хорошо'; gradeClass = 'grade-hor'; }
+      else if (pct >= 60) { grade = 'Удовл.'; gradeClass = 'grade-udov'; }
+      else { grade = 'Неудовл.'; gradeClass = 'grade-neud'; }
+
+      const card = el('div', { class: 'question-card' });
+
+      // Заголовок: дата + результат
+      card.appendChild(el('div', { class: 'row between', style: 'margin-bottom:8px;' },
+        el('div', { style: 'font-weight:600;' }, fmtDate(attempt.finished_at)),
+        el('div', { class: gradeClass, style: 'font-weight:700;' }, `${correct} / ${total} · ${pct}% — ${grade}`)
+      ));
+
+      // Время
+      card.appendChild(el('div', { class: 'muted small', style: 'margin-bottom:10px;' },
+        `⏱ Время прохождения: ${fmtDuration(attempt.duration_ms || 0)}`
+      ));
+
+      // Разбивка по разделам (только те, в которых были ошибки или были вопросы вообще)
+      const sections = (attempt.details && attempt.details.sections) || [];
+      if (sections.length) {
+        card.appendChild(el('div', { class: 'muted small', style: 'margin-bottom:6px;font-weight:600;' }, 'По разделам:'));
+        const secList = el('div', { style: 'display:flex;flex-direction:column;gap:6px;' });
+        sections.forEach(s => {
+          const sTotal   = s.total || 0;
+          const sCorrect = s.correct || 0;
+          const sWrong   = s.wrong || 0;
+          const sPct     = sTotal ? Math.round(sCorrect / sTotal * 100) : 0;
+          const colorVar = sWrong === 0 ? 'var(--correct)' : (sPct >= 60 ? 'var(--warn)' : 'var(--wrong)');
+          secList.appendChild(el('div', {
+            style: 'display:flex;justify-content:space-between;font-size:13px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;',
+          },
+            el('span', {}, `Раздел ${s.number}: ${s.title || ''}`.trim()),
+            el('span', { style: `color:${colorVar};font-weight:600;white-space:nowrap;` },
+              `${sCorrect}/${sTotal} (${sPct}%)`
+            )
+          ));
+        });
+        card.appendChild(secList);
+      }
+
+      list.appendChild(card);
+    });
+    this.root.appendChild(list);
   },
 
   renderPatchesList() {
@@ -1919,36 +2057,22 @@ const Session = {
 
   _showExitExamDialog() {
     const overlay = el('div', { class: 'modal-overlay', id: 'exit-exam-modal' });
+    const closeIt = () => { try { document.body.removeChild(overlay); } catch (e) {} };
     overlay.addEventListener('click', e => { if (e.target === overlay) closeIt(); });
     const modal = el('div', { class: 'modal' });
 
-    const closeIt = () => { try { document.body.removeChild(overlay); } catch (e) {} };
-
     modal.appendChild(el('div', { class: 'modal-header' },
-      el('h3', { class: 'modal-title' }, 'Выйти из экзамена?'),
+      el('h3', { class: 'modal-title' }, 'Завершить экзамен?'),
       el('button', { class: 'modal-close', onclick: closeIt, title: 'Закрыть' }, '×')
     ));
 
     modal.appendChild(el('div', { class: 'modal-hint' },
-      'Таймер уже идёт. Что вы хотите сделать?'
+      'Если хочешь увидеть результат сейчас — нажми «Завершить». Иначе экзамен можно продолжить.'
     ));
 
     const actions = el('div', { class: 'modal-actions', style: 'flex-direction:column;gap:10px;align-items:stretch;' });
 
-    // Вариант 1: выйти с сохранением — таймер продолжает идти на главном экране
-    actions.appendChild(el('button', {
-      class: 'btn-primary',
-      style: 'width:100%;',
-      onclick: () => {
-        closeIt();
-        // Таймер уже сохранён в lastMode (startedAt). На главной он будет тикать.
-        // _examTimerInterval остановим — на главной запустим свой.
-        clearExamTimer();
-        App.goHome();
-      }
-    }, '⏸ Выйти, таймер продолжит идти'));
-
-    // Вариант 2: завершить экзамен — посчитать результат
+    // Завершить экзамен — посчитать результат и записать в историю
     actions.appendChild(el('button', {
       class: 'btn-danger',
       style: 'width:100%;',
@@ -1956,9 +2080,9 @@ const Session = {
         closeIt();
         this.finishExam();
       }
-    }, '🏁 Завершить экзамен и получить результат'));
+    }, '🏁 Завершить экзамен и посмотреть результат'));
 
-    // Вариант 3: остаться
+    // Остаться
     actions.appendChild(el('button', {
       style: 'width:100%;',
       onclick: closeIt,
@@ -1971,17 +2095,53 @@ const Session = {
 
   finishExam() {
     clearExamTimer();
+    // Снимаем startedAt и order ДО очистки lastMode — они нужны для записи в историю
+    const startedAt = (Store.data.lastMode && Store.data.lastMode.startedAt)
+                    || this.s.startedAt
+                    || Date.now();
     Store.clearLastMode();  // сбрасываем сохранённый экзамен после завершения
     const results = [];
     let correctCount = 0;
+    // Разбивка по разделам: {sectionNumber: {title, total, correct, wrong}}
+    const sectionsStats = {};
     for (const qid of this.s.order) {
       const q = getQuestion(qid);
       const stored = Store.getAnswer(qid);
       const given = stored ? stored.given : null;
-      const status = stored ? stored.status : 'wrong'; // вопросы без ответа считаются неверными
+      const status = stored ? stored.status : 'wrong'; // без ответа = неверно
       if (status === 'correct') correctCount++;
       results.push({ q, given, status, answered: !!stored });
+
+      // Копим статистику по разделу
+      const sNum   = q && q.section != null ? q.section : 0;
+      const sTitle = (q && q.section_title) || `Раздел ${sNum}`;
+      if (!sectionsStats[sNum]) sectionsStats[sNum] = { number: sNum, title: sTitle, total: 0, correct: 0, wrong: 0 };
+      sectionsStats[sNum].total++;
+      if (status === 'correct') sectionsStats[sNum].correct++;
+      else sectionsStats[sNum].wrong++;
     }
+
+    // Пишем попытку в облако (если есть авторизация). Дубль защищён started_at в API.
+    try {
+      const finishedAt = Date.now();
+      const attempt = {
+        started_at:  startedAt,
+        finished_at: finishedAt,
+        total:       results.length,
+        correct:     correctCount,
+        duration_ms: Math.max(0, finishedAt - startedAt),
+        details: {
+          sections: Object.values(sectionsStats)
+            .sort((a, b) => a.number - b.number),
+        },
+      };
+      saveExamAttempt(attempt);  // fire-and-forget, см. ниже
+      // Локальный кэш истории — чтобы экран «История» работал даже без сети
+      ExamHistory.add(attempt);
+    } catch (e) {
+      console.warn('saveExamAttempt failed:', e);
+    }
+
     this.renderExamResults(correctCount, results);
   },
 
@@ -2551,6 +2711,43 @@ Store.resetWithApi = function() {
   console.log('[API] прогресс сброшен');
 };
 
+/* ── История экзаменов: API ── */
+
+// Записать попытку (fire-and-forget). Сервер дедуплицирует по started_at.
+function saveExamAttempt(attempt) {
+  const auth = _apiAuth();
+  if (!auth) return;
+  _apiFetch(`/exam-history/${auth.userId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(attempt),
+  });
+}
+
+// Подтянуть историю с сервера — облако всегда побеждает (источник истины).
+async function loadExamHistoryFromCloud() {
+  const auth = _apiAuth();
+  if (!auth) return;
+  const r = await _apiFetch(`/exam-history/${auth.userId}`);
+  if (!r) return;
+  try {
+    const data = await r.json();
+    if (data && Array.isArray(data.items)) {
+      ExamHistory.replaceAll(data.items);
+    }
+  } catch (e) {
+    console.warn('[API] loadExamHistoryFromCloud parse:', e);
+  }
+}
+
+// Очистка истории — локально и на сервере
+function clearExamHistoryWithApi() {
+  ExamHistory.clear();
+  const auth = _apiAuth();
+  if (!auth) return;
+  _apiFetch(`/exam-history/${auth.userId}`, { method: 'DELETE' });
+}
+
 /* BackButton */
 if (tg?.BackButton) { tg.BackButton.onClick(() => App.exitToHome()); }
 const _gh = App.goHome.bind(App);
@@ -2609,6 +2806,8 @@ async function boot() {
     ltext.textContent = 'Синхронизируем прогресс…';
     Store.load();
     await new Promise(r => Store.loadFromCloud(r));
+    // Подтягиваем историю экзаменов (необязательная операция — не блокирует UI)
+    loadExamHistoryFromCloud().catch(e => console.warn('history load:', e));
     loader.style.opacity = '0';
     setTimeout(() => {
       loader.style.display = 'none';
