@@ -1138,7 +1138,7 @@ const App = {
       this.root.appendChild(el('div', { style: 'margin-top:32px;text-align:center;' },
         el('button', { class: 'btn-ghost', onclick: () => {
           if (confirm('Точно сбросить весь прогресс? Это действие необратимо.')) {
-            Store.resetAll();
+            Store.resetWithApi();
             location.reload();
           }
         }}, 'Сбросить весь прогресс')
@@ -2225,56 +2225,71 @@ App.renderHome();
 
 
 /* API Sync — прогресс через VPS (синхронизация с ботом) */
-const API_URL = 'https://gosbot.ddns.net';  // ← вставить домен/IP VPS с https://
+const API_URL = 'https://gosbot.ddns.net';
 
-(function() {
-  const tgUser   = tg?.initDataUnsafe?.user;
+// Читаем tg-данные лениво при каждом вызове — не кэшируем при загрузке
+function _apiAuth() {
+  const user     = tg?.initDataUnsafe?.user;
   const initData = tg?.initData || '';
+  if (!user?.id || !initData || !API_URL || !API_URL.startsWith('https')) return null;
+  return { userId: user.id, initData };
+}
 
-  // Обёртка над Store.save — дополнительно шлём на API (fire-and-forget)
-  const _saveLocal = Store.save.bind(Store);
-  Store.save = function() {
-    _saveLocal();
-    if (!tgUser?.id || !initData || !API_URL.startsWith('https')) return;
-    fetch(`${API_URL}/progress/${tgUser.id}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type':  'application/json',
-        'Authorization': 'TgInitData ' + initData,
-      },
-      body: JSON.stringify({
-        answers:   Store.data.answers,
-        last_mode: Store.data.lastMode || null,
-      }),
-    }).catch(() => {});
-  };
+// Обёртка над Store.save — дополнительно шлём на API (fire-and-forget)
+const _saveLocal = Store.save.bind(Store);
+Store.save = function() {
+  _saveLocal();
+  const auth = _apiAuth();
+  if (!auth) return;
+  fetch(`${API_URL}/progress/${auth.userId}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type':  'application/json',
+      'Authorization': 'TgInitData ' + auth.initData,
+    },
+    body: JSON.stringify({
+      answers:   Store.data.answers,
+      last_mode: Store.data.lastMode || null,
+    }),
+  }).catch(e => console.warn('[API] save error:', e));
+};
 
-  // Загрузка прогресса с API при старте
-  Store.loadFromCloud = async function(cb) {
-    if (!tgUser?.id || !initData || !API_URL.startsWith('https')) { cb(); return; }
-    try {
-      const r = await fetch(`${API_URL}/progress/${tgUser.id}`, {
-        headers: { 'Authorization': 'TgInitData ' + initData },
-      });
-      if (r.ok) {
-        const data = await r.json();
-        // Мерж: побеждает более свежий timestamp
-        if (data.answers) {
-          for (const [id, v] of Object.entries(data.answers)) {
-            const loc = Store.data.answers[id];
-            if (!loc || (v.ts||0) > (loc.ts||0)) Store.data.answers[id] = v;
-          }
+// Загрузка прогресса с API при старте (мерж с localStorage)
+Store.loadFromCloud = async function(cb) {
+  const auth = _apiAuth();
+  if (!auth) { cb(); return; }
+  try {
+    const r = await fetch(`${API_URL}/progress/${auth.userId}`, {
+      headers: { 'Authorization': 'TgInitData ' + auth.initData },
+    });
+    if (r.ok) {
+      const data = await r.json();
+      if (data.answers) {
+        for (const [id, v] of Object.entries(data.answers)) {
+          const loc = Store.data.answers[id];
+          if (!loc || (v.ts||0) >= (loc.ts||0)) Store.data.answers[id] = v;
         }
-        // Восстанавливаем позицию общего режима из API
-        if (data.last_mode && !Store.data.lastMode) {
-          Store.data.lastMode = data.last_mode;
-        }
-        _saveLocal();
       }
-    } catch(e) { console.warn('API sync error:', e); }
-    cb();
-  };
-})();
+      if (data.last_mode && !Store.data.lastMode) {
+        Store.data.lastMode = data.last_mode;
+      }
+      _saveLocal();
+    }
+  } catch(e) { console.warn('[API] load error:', e); }
+  cb();
+};
+
+// Сброс прогресса — чистим и API тоже
+Store.resetWithApi = function() {
+  const auth = _apiAuth();
+  Store.data  = { answers: {}, lastMode: null, overrides: Store.data.overrides || {} };
+  _saveLocal();
+  if (!auth) return;
+  fetch(`${API_URL}/progress/${auth.userId}`, {
+    method:  'DELETE',
+    headers: { 'Authorization': 'TgInitData ' + auth.initData },
+  }).catch(e => console.warn('[API] reset error:', e));
+};
 
 /* BackButton */
 if (tg?.BackButton) { tg.BackButton.onClick(() => App.goHome()); }
