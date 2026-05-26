@@ -2227,82 +2227,101 @@ App.renderHome();
 /* API Sync — прогресс через VPS (синхронизация с ботом) */
 const API_URL = 'https://gosbot.ddns.net';
 
-// Читаем tg-данные лениво при каждом вызове — не кэшируем при загрузке
 function _apiAuth() {
   const user     = tg?.initDataUnsafe?.user;
   const initData = tg?.initData || '';
-  if (!user?.id || !initData || !API_URL || !API_URL.startsWith('https')) return null;
+  if (!user?.id) { console.warn('[API] нет user.id — tg.initDataUnsafe:', tg?.initDataUnsafe); return null; }
+  if (!initData)  { console.warn('[API] нет initData'); return null; }
+  if (!API_URL.startsWith('https')) { console.warn('[API] URL не HTTPS'); return null; }
   return { userId: user.id, initData };
+}
+
+// Универсальная обёртка для API-запросов с логированием
+async function _apiFetch(path, options = {}) {
+  const auth = _apiAuth();
+  if (!auth) return null;
+  const url = `${API_URL}${path}`;
+  try {
+    const r = await fetch(url, {
+      ...options,
+      headers: {
+        ...(options.headers || {}),
+        'Authorization': 'TgInitData ' + auth.initData,
+      },
+    });
+    if (!r.ok) {
+      console.warn(`[API] ${options.method||'GET'} ${url} → ${r.status}`);
+      return null;
+    }
+    return r;
+  } catch(e) {
+    console.warn(`[API] ${options.method||'GET'} ${url} → ошибка:`, e.message);
+    return null;
+  }
 }
 
 // Обёртка над Store.save — дополнительно шлём на API (fire-and-forget)
 const _saveLocal = Store.save.bind(Store);
 Store.save = function() {
   _saveLocal();
-  // Обновляем метку времени последнего сохранения (для сравнения с reset_at)
   localStorage.setItem('gosexam_last_save_ts', String(Date.now()));
   const auth = _apiAuth();
   if (!auth) return;
-  fetch(`${API_URL}/progress/${auth.userId}`, {
+  // Сохраняем на сервер — любой ответ игнорируем (fire-and-forget)
+  _apiFetch(`/progress/${auth.userId}`, {
     method: 'POST',
-    headers: {
-      'Content-Type':  'application/json',
-      'Authorization': 'TgInitData ' + auth.initData,
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       answers:   Store.data.answers,
       last_mode: Store.data.lastMode || null,
     }),
-  }).catch(e => console.warn('[API] save error:', e));
+  });
 };
 
 // Загрузка прогресса с API при старте (мерж с localStorage)
 Store.loadFromCloud = async function(cb) {
   const auth = _apiAuth();
   if (!auth) { cb(); return; }
-  try {
-    const r = await fetch(`${API_URL}/progress/${auth.userId}`, {
-      headers: { 'Authorization': 'TgInitData ' + auth.initData },
-    });
-    if (r.ok) {
-      const data = await r.json();
-      const resetAt    = data.reset_at || 0;
-      const localSaveTs = parseInt(localStorage.getItem('gosexam_last_save_ts') || '0');
 
-      if (resetAt > 0 && resetAt > localSaveTs) {
-        // Бот сбросил прогресс — чистим localStorage тоже
-        Store.data = { answers: {}, lastMode: null, overrides: Store.data.overrides || {} };
-        _saveLocal();
-        localStorage.setItem('gosexam_last_save_ts', String(resetAt));
-        console.log('[API] прогресс сброшен по сигналу бота, reset_at=', resetAt);
-      } else {
-        // Обычная синхронизация: мержим
-        if (data.answers) {
-          for (const [id, v] of Object.entries(data.answers)) {
-            const loc = Store.data.answers[id];
-            if (!loc || (v.ts||0) >= (loc.ts||0)) Store.data.answers[id] = v;
-          }
-        }
-        if (data.last_mode && !Store.data.lastMode) {
-          Store.data.lastMode = data.last_mode;
-        }
-        _saveLocal();
+  const r = await _apiFetch(`/progress/${auth.userId}`);
+  if (!r) { cb(); return; }
+
+  const data = await r.json();
+  const resetAt     = data.reset_at || 0;
+  const localSaveTs = parseInt(localStorage.getItem('gosexam_last_save_ts') || '0');
+
+  if (resetAt > 0 && resetAt > localSaveTs) {
+    // Сброс из бота — чистим localStorage
+    Store.data = { answers: {}, lastMode: null, overrides: Store.data.overrides || {} };
+    _saveLocal();
+    localStorage.setItem('gosexam_last_save_ts', String(resetAt));
+    console.log('[API] прогресс сброшен по сигналу бота');
+  } else {
+    // Мерж: побеждает более новый timestamp
+    if (data.answers) {
+      for (const [id, v] of Object.entries(data.answers)) {
+        const loc = Store.data.answers[id];
+        if (!loc || (v.ts||0) >= (loc.ts||0)) Store.data.answers[id] = v;
       }
     }
-  } catch(e) { console.warn('[API] load error:', e); }
+    if (data.last_mode && !Store.data.lastMode) {
+      Store.data.lastMode = data.last_mode;
+    }
+    _saveLocal();
+    console.log('[API] прогресс загружен, ответов:', Object.keys(Store.data.answers).length);
+  }
   cb();
 };
 
 // Сброс прогресса — чистим и API тоже
 Store.resetWithApi = function() {
-  const auth = _apiAuth();
-  Store.data  = { answers: {}, lastMode: null, overrides: Store.data.overrides || {} };
+  Store.data = { answers: {}, lastMode: null, overrides: Store.data.overrides || {} };
   _saveLocal();
+  localStorage.removeItem('gosexam_last_save_ts');
+  const auth = _apiAuth();
   if (!auth) return;
-  fetch(`${API_URL}/progress/${auth.userId}`, {
-    method:  'DELETE',
-    headers: { 'Authorization': 'TgInitData ' + auth.initData },
-  }).catch(e => console.warn('[API] reset error:', e));
+  _apiFetch(`/progress/${auth.userId}`, { method: 'DELETE' });
+  console.log('[API] прогресс сброшен');
 };
 
 /* BackButton */
