@@ -804,11 +804,12 @@ function setBackBtn(show) {
   show ? tg.BackButton.show() : tg.BackButton.hide();
 }
 
-let QUESTIONS = [];
+let QUESTIONS = [];      // ТОЛЬКО для тренажёра (марафон, экзамен, разделы, ошибки)
+let QUESTIONS_ALL = [];  // Полный набор (включая search_only — для поиска)
 
 const QUESTIONS_URL = 'https://raw.githubusercontent.com/VladislavNoname/gosbot-/main/questions_miniapp.json';
-const Q_CACHE_KEY = 'gosexam_q_cache_v2';
-const Q_CACHE_TS  = 'gosexam_q_cache_ts';
+const Q_CACHE_KEY = 'gosexam_q_cache_v3';
+const Q_CACHE_TS  = 'gosexam_q_cache_ts_v3';
 const Q_CACHE_TTL = 30 * 60 * 1000;  // 30 мин кэш
 
 // Базовый URL папки с картинками вопросов.
@@ -824,7 +825,11 @@ function imageUrl(name) {
 }
 
 function _rebuildIndex() {
-  QUESTIONS_BY_ID = new Map(QUESTIONS.map(q => [q.id, q]));
+  // QUESTIONS_ALL — что пришло (включая search_only и формулы)
+  // QUESTIONS — фильтрованное для тренажёра: без search_only, без формул
+  QUESTIONS = QUESTIONS_ALL.filter(q => !q.search_only && q.type !== 'formula');
+  // Индекс по id строим по ПОЛНОМУ набору — чтобы поиск находил формулы и т.п.
+  QUESTIONS_BY_ID = new Map(QUESTIONS_ALL.map(q => [q.id, q]));
 }
 
 // ── Расшифровка вопросов (AES-256-GCM, Web Crypto API) ──────
@@ -835,7 +840,7 @@ async function loadQuestions() {
     if (Date.now() - ts < Q_CACHE_TTL) {
       const cached = localStorage.getItem(Q_CACHE_KEY);
       if (cached) {
-        QUESTIONS = JSON.parse(cached);
+        QUESTIONS_ALL = JSON.parse(cached);
         _rebuildIndex();
         return;
       }
@@ -852,16 +857,16 @@ async function loadQuestions() {
     });
     if (r.status === 403) throw new Error('ACCESS_DENIED');
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    QUESTIONS = await r.json();
+    QUESTIONS_ALL = await r.json();
   } else {
     const r = await fetch(QUESTIONS_URL + '?t=' + Date.now());
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    QUESTIONS = await r.json();
+    QUESTIONS_ALL = await r.json();
   }
 
   _rebuildIndex();
   try {
-    localStorage.setItem(Q_CACHE_KEY, JSON.stringify(QUESTIONS));
+    localStorage.setItem(Q_CACHE_KEY, JSON.stringify(QUESTIONS_ALL));
     localStorage.setItem(Q_CACHE_TS, String(Date.now()));
   } catch(e) {}
 }
@@ -1251,7 +1256,7 @@ const App = {
       el('button', { class: 'mode-card', onclick: () => App.renderSearch() },
         el('div', { class: 'mode-card-icon' }, '🔍'),
         el('div', { class: 'mode-card-title' }, 'Поиск'),
-        el('div', { class: 'mode-card-desc' }, 'Найдите вопрос по тексту и сразу увидите правильный ответ.')
+        el('div', { class: 'mode-card-desc' }, 'Найдите вопрос, ответ или формулу по тексту. Поиск идёт по полной базе, включая справочник.')
       ),
       el('button', { class: 'mode-card', onclick: () => Mode.startAll() },
         el('div', { class: 'mode-card-icon' }, '📖'),
@@ -1377,9 +1382,15 @@ const App = {
       .replace(/\s+/g, ' ')
       .trim();
 
-    // Предкомпилируем индекс: для каждого вопроса нормализованный текст
-    // (вычисляется один раз — даже для 700 вопросов это мгновенно).
-    const index = QUESTIONS.map(q => ({ q, key: normalize(q.text) }));
+    // Предкомпилируем индекс по ПОЛНОМУ набору (включая search_only и формулы).
+    // Для формул в ключ поиска добавляем и саму формулу, и описание — чтобы
+    // запрос вида "NPV", "BEP" находил справочную карточку.
+    const index = QUESTIONS_ALL.map(q => {
+      let key = normalize(q.text || '');
+      if (q.formula)     key += ' ' + normalize(q.formula);
+      if (q.description) key += ' ' + normalize(q.description);
+      return { q, key };
+    });
 
     const renderResults = (matches) => {
       list.innerHTML = '';
@@ -1388,6 +1399,33 @@ const App = {
       matches.slice(0, MAX_SHOW).forEach(({ q }) => {
         const card = el('div', { class: 'question-card', style: 'margin-bottom:10px;padding:12px 14px;' });
 
+        // === Формула: специальная карточка ===
+        if (q.type === 'formula') {
+          card.appendChild(el('div', { class: 'muted small', style: 'margin-bottom:6px;' },
+            '📐 Формула · ' + (q.section_title || '')));
+          // Название формулы (то, что хранится в text)
+          card.appendChild(el('div', { style: 'font-weight:600;margin-bottom:8px;line-height:1.4;' },
+            (q.text || '').replace(/^Формула:\s*/, '')));
+          // Сама формула — моноширинно, в блоке
+          if (q.formula) {
+            card.appendChild(el('div', {
+              style: 'background:var(--correct-bg);padding:10px 12px;border-radius:8px;'
+                   + 'font-family:ui-monospace,Menlo,Consolas,monospace;font-size:14px;'
+                   + 'color:var(--correct);font-weight:600;white-space:pre-wrap;word-break:break-word;'
+            }, q.formula));
+          }
+          // Пояснение
+          if (q.description) {
+            card.appendChild(el('div', {
+              class: 'muted small',
+              style: 'margin-top:8px;line-height:1.4;'
+            }, q.description));
+          }
+          list.appendChild(card);
+          return;
+        }
+
+        // === Обычный вопрос ===
         // Метка раздела
         card.appendChild(el('div', { class: 'muted small', style: 'margin-bottom:6px;' },
           q.section_title || (q.section != null ? `Раздел ${q.section}` : '')
@@ -1446,7 +1484,7 @@ const App = {
     const runSearch = () => {
       const raw = input.value.trim();
       if (!raw) {
-        status.textContent = `Введите текст для поиска (всего ${QUESTIONS.length} вопросов в базе)`;
+        status.textContent = `Введите текст для поиска (всего ${QUESTIONS_ALL.length} записей в базе, включая формулы)`;
         list.innerHTML = '';
         return;
       }
@@ -1456,7 +1494,7 @@ const App = {
         list.innerHTML = '';
         return;
       }
-      // Разбиваем запрос на слова — все должны встретиться в тексте вопроса.
+      // Разбиваем запрос на слова — все должны встретиться в тексте/формуле.
       const words = needle.split(' ').filter(Boolean);
       const matches = index.filter(({ key }) => words.every(w => key.includes(w))).map(x => x);
       status.textContent = matches.length
