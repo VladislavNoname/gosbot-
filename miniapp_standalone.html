@@ -1095,8 +1095,10 @@ const App = {
       ),
     ));
 
-    // Возобновление общего режима
-    if (Store.data.lastMode && Store.data.lastMode.type === 'all') {
+    // Возобновление общего режима — только если есть реальные ответы (не после сброса)
+    const _lmHasProgress = Store.data.lastMode && Store.data.lastMode.type === 'all' &&
+      Store.data.lastMode.order && Store.data.lastMode.order.some(id => Store.getAnswer(id));
+    if (_lmHasProgress) {
       const lm = Store.data.lastMode;
       this.root.appendChild(el('div', { class: 'question-card', style: 'margin-bottom:18px;' },
         el('div', { class: 'row between' },
@@ -1276,7 +1278,7 @@ const Mode = {
   },
 
   startAll() {
-    const order = shuffle(QUESTIONS.map(q => q.id));
+    const order = QUESTIONS.map(q => q.id);
     const startIdx = this._firstUnanswered(order);
     const session = {
       kind: 'practice',
@@ -1292,9 +1294,6 @@ const Mode = {
   resumeAll() {
     const lm = Store.data.lastMode;
     if (!lm) return this.startAll();
-    // Если прогресс сброшен (нет ни одного ответа) — начать заново с перемешиванием
-    const anyAnswered = lm.order && lm.order.some(id => Store.getAnswer(id));
-    if (!anyAnswered) return this.startAll();
     // Ищем первый неотвеченный начиная с сохранённой позиции
     const saved = lm.currentIndex || 0;
     let startIdx = saved;
