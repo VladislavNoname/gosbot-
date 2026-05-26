@@ -1191,10 +1191,11 @@ const App = {
       const _elapsed   = Date.now() - _examLm.startedAt;
       const _remaining = 3600000 - _elapsed;
       if (_remaining > 0) {
-        // Сколько ответов уже дано — для подсказки в карточке
-        const _answered = _examLm.order.filter(id => Store.getAnswer(id)).length;
+        // Считаем ответы из изолированного хранилища попытки (attemptAnswers).
+        // Глобальный Store.data.answers — НЕ источник для экзамена.
+        const _attempt  = _examLm.attemptAnswers || {};
+        const _answered = Object.keys(_attempt).length;
         const _total    = _examLm.order.length;
-        // Текстовый узел с оставшимся временем — будем обновлять его раз в секунду
         const timerText = document.createTextNode(
           `Осталось времени: ${_fmtTimer(_remaining)} · Отвечено: ${_answered} из ${_total}`
         );
@@ -1232,7 +1233,7 @@ const App = {
             clearInterval(_homeTimerInterval); _homeTimerInterval = null;
             return;
           }
-          const ansCount = lm.order.filter(id => Store.getAnswer(id)).length;
+          const ansCount = Object.keys(lm.attemptAnswers || {}).length;
           timerText.nodeValue = `Осталось времени: ${_fmtTimer(rem)} · Отвечено: ${ansCount} из ${lm.order.length}`;
         }, 1000);
       } else {
@@ -1247,6 +1248,11 @@ const App = {
 
     this.root.appendChild(el('h2', {}, 'Выберите режим'));
     this.root.appendChild(el('div', { class: 'mode-grid' },
+      el('button', { class: 'mode-card', onclick: () => App.renderSearch() },
+        el('div', { class: 'mode-card-icon' }, '🔍'),
+        el('div', { class: 'mode-card-title' }, 'Поиск'),
+        el('div', { class: 'mode-card-desc' }, 'Найдите вопрос по тексту и сразу увидите правильный ответ.')
+      ),
       el('button', { class: 'mode-card', onclick: () => Mode.startAll() },
         el('div', { class: 'mode-card-icon' }, '📖'),
         el('div', { class: 'mode-card-title' }, 'Марафон вопросов'),
@@ -1332,6 +1338,136 @@ const App = {
       return;
     }
     Mode.startSubset(errorQs, `Работа над ошибками (${errorQs.length})`, true);
+  },
+
+  renderSearch() {
+    this.topMeta.textContent = 'Поиск';
+    this.root.innerHTML = '';
+    this.root.appendChild(el('button', { class: 'btn-ghost', onclick: () => App.goHome() }, '← К меню'));
+
+    this.root.appendChild(el('h2', { style: 'margin:8px 0 4px;' }, '🔍 Поиск вопроса'));
+    this.root.appendChild(el('div', { class: 'muted small', style: 'margin-bottom:12px;' },
+      'Начните вводить текст вопроса — список будет обновляться в реальном времени.'
+    ));
+
+    // Поле ввода
+    const input = el('input', {
+      type: 'text',
+      placeholder: 'Например: денежный поток, ERP, BPMN…',
+      style: 'width:100%;padding:12px 14px;font-size:15px;border-radius:10px;'
+           + 'border:1px solid var(--border);background:var(--bg);color:var(--fg);'
+           + 'box-sizing:border-box;outline:none;',
+      autocomplete: 'off',
+      autofocus: true,
+      spellcheck: 'false',
+    });
+    this.root.appendChild(input);
+
+    const status = el('div', { class: 'muted small', style: 'margin:10px 0 4px;' }, '');
+    this.root.appendChild(status);
+
+    const list = el('div', { class: 'topic-list', style: 'margin-top:8px;' });
+    this.root.appendChild(list);
+
+    // Нормализация для поиска: lowercase + убираем пунктуацию
+    const normalize = s => (s || '')
+      .toLowerCase()
+      .replace(/[ё]/g, 'е')
+      .replace(/[*«»"\'()\[\],:;–—\-?!.]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    // Предкомпилируем индекс: для каждого вопроса нормализованный текст
+    // (вычисляется один раз — даже для 700 вопросов это мгновенно).
+    const index = QUESTIONS.map(q => ({ q, key: normalize(q.text) }));
+
+    const renderResults = (matches) => {
+      list.innerHTML = '';
+      if (!matches.length) return;
+      const MAX_SHOW = 50;
+      matches.slice(0, MAX_SHOW).forEach(({ q }) => {
+        const card = el('div', { class: 'question-card', style: 'margin-bottom:10px;padding:12px 14px;' });
+
+        // Метка раздела
+        card.appendChild(el('div', { class: 'muted small', style: 'margin-bottom:6px;' },
+          q.section_title || (q.section != null ? `Раздел ${q.section}` : '')
+        ));
+        // Текст вопроса
+        card.appendChild(el('div', { style: 'font-weight:500;margin-bottom:8px;line-height:1.4;' }, q.text));
+
+        // Картинка (если есть)
+        if (q.image) {
+          card.appendChild(el('img', {
+            class: 'question-image',
+            src: imageUrl(q.image),
+            alt: '',
+            loading: 'lazy',
+            style: 'max-width:100%;margin-bottom:8px;',
+          }));
+        }
+
+        // Правильные ответы
+        if (q.type === 'sequence' && Array.isArray(q.sequence)) {
+          const seqBlock = el('div', { style: 'background:var(--correct-bg);padding:8px 10px;border-radius:8px;' });
+          seqBlock.appendChild(el('div', { style: 'font-weight:600;color:var(--correct);margin-bottom:4px;font-size:13px;' },
+            '✓ Правильная последовательность:'));
+          q.sequence.forEach((s, i) => {
+            seqBlock.appendChild(el('div', { style: 'font-size:13px;line-height:1.4;' },
+              `${i + 1}. ${s.text}`));
+          });
+          card.appendChild(seqBlock);
+        } else {
+          const corrects = (q.options || []).filter(o => o.correct);
+          if (corrects.length) {
+            const ansBlock = el('div', { style: 'background:var(--correct-bg);padding:8px 10px;border-radius:8px;' });
+            ansBlock.appendChild(el('div', { style: 'font-weight:600;color:var(--correct);margin-bottom:4px;font-size:13px;' },
+              corrects.length > 1 ? '✓ Правильные ответы:' : '✓ Правильный ответ:'));
+            corrects.forEach(o => {
+              ansBlock.appendChild(el('div', { style: 'font-size:13px;line-height:1.4;' }, `• ${o.text}`));
+            });
+            card.appendChild(ansBlock);
+          }
+        }
+
+        // Решение (для расчётных)
+        if (q.solution) {
+          card.appendChild(el('div', { class: 'solution-block', style: 'margin-top:8px;' },
+            el('strong', {}, '💡 Решение: '), q.solution));
+        }
+
+        list.appendChild(card);
+      });
+      if (matches.length > MAX_SHOW) {
+        list.appendChild(el('div', { class: 'muted small', style: 'text-align:center;padding:10px;' },
+          `Показано ${MAX_SHOW} из ${matches.length} результатов. Уточните запрос, чтобы увидеть нужный.`));
+      }
+    };
+
+    const runSearch = () => {
+      const raw = input.value.trim();
+      if (!raw) {
+        status.textContent = `Введите текст для поиска (всего ${QUESTIONS.length} вопросов в базе)`;
+        list.innerHTML = '';
+        return;
+      }
+      const needle = normalize(raw);
+      if (needle.length < 2) {
+        status.textContent = 'Введите хотя бы 2 символа…';
+        list.innerHTML = '';
+        return;
+      }
+      // Разбиваем запрос на слова — все должны встретиться в тексте вопроса.
+      const words = needle.split(' ').filter(Boolean);
+      const matches = index.filter(({ key }) => words.every(w => key.includes(w))).map(x => x);
+      status.textContent = matches.length
+        ? `Найдено: ${matches.length}`
+        : 'Ничего не найдено. Попробуйте другие слова.';
+      renderResults(matches);
+    };
+
+    // Live-поиск
+    input.addEventListener('input', runSearch);
+    runSearch();  // первый вызов покажет статус
   },
 
   renderExamHistory() {
@@ -1584,10 +1720,12 @@ const Mode = {
       const elapsed   = Date.now() - lm.startedAt;
       const remaining = 3600000 - elapsed;
       if (remaining > 0) {
-        // Продолжаем существующий экзамен (с ответами или без)
+        // Продолжаем существующий экзамен (с ответами или без).
+        // attemptAnswers — изолированные ответы текущей попытки экзамена.
         Session.start({ kind: 'exam', title: 'Экзамен из 40 случайных вопросов',
           order: lm.order, currentIndex: lm.currentIndex || 0,
-          startedAt: lm.startedAt, saveAsLastMode: 'exam' });
+          startedAt: lm.startedAt, saveAsLastMode: 'exam',
+          examAnswers: lm.attemptAnswers || {} });
         startExamTimer(lm.startedAt);
         return;
       }
@@ -1596,11 +1734,15 @@ const Mode = {
     }
     // Новый экзамен: фиксируем startedAt и lastMode СРАЗУ — таймер сразу тикает,
     // карточка «Продолжить экзамен» появится на главной, даже если нет ответов.
+    // attemptAnswers пустой — экзамен начинается с чистого листа, не зависит от того,
+    // что пользователь раньше отвечал в марафоне или по разделам.
     const ids = shuffle(QUESTIONS.map(q => q.id)).slice(0, Math.min(40, QUESTIONS.length));
     const startedAt = Date.now();
-    Store.setLastMode({ type: 'exam', currentIndex: 0, order: ids, startedAt, ts: Date.now() });
+    Store.setLastMode({ type: 'exam', currentIndex: 0, order: ids, startedAt,
+                        attemptAnswers: {}, ts: Date.now() });
     Session.start({ kind: 'exam', title: 'Экзамен из 40 случайных вопросов',
-      order: ids, currentIndex: 0, startedAt, saveAsLastMode: 'exam' });
+      order: ids, currentIndex: 0, startedAt, saveAsLastMode: 'exam',
+      examAnswers: {} });
     startExamTimer(startedAt);
   },
 
@@ -1706,9 +1848,15 @@ const Session = {
     this.renderCurrent();
   },
 
-  // Проверяет, есть ли хотя бы один сохранённый ответ среди вопросов сессии
+  // Проверяет, есть ли хотя бы один сохранённый ответ среди вопросов сессии.
+  // Для экзамена смотрим в s.examAnswers (изолированные ответы попытки),
+  // а не в глобальный Store.
   _hasAnyAnswerInSession() {
     if (!this.s || !this.s.order) return false;
+    if (this.s.kind === 'exam') {
+      const ea = this.s.examAnswers || {};
+      return Object.keys(ea).length > 0;
+    }
     for (const qid of this.s.order) {
       if (Store.getAnswer(qid)) return true;
     }
@@ -1723,9 +1871,17 @@ const Session = {
       if (!this._hasAnyAnswerInSession()) return;
       Store.setLastMode({ type: 'all', currentIndex: this.s.currentIndex, order: this.s.order, ts: Date.now() });
     } else if (this.s.saveAsLastMode === 'exam') {
-      // Экзамен: lastMode уже создан при startExam() со startedAt. Просто обновляем currentIndex.
+      // Экзамен: lastMode уже создан при startExam() со startedAt.
+      // Обновляем currentIndex и изолированные ответы попытки (attemptAnswers).
       const startedAt = this.s.startedAt;
-      Store.setLastMode({ type: 'exam', currentIndex: this.s.currentIndex, order: this.s.order, startedAt, ts: Date.now() });
+      Store.setLastMode({
+        type:           'exam',
+        currentIndex:   this.s.currentIndex,
+        order:          this.s.order,
+        startedAt,
+        attemptAnswers: this.s.examAnswers || {},
+        ts:             Date.now(),
+      });
       if (!_examTimerInterval) startExamTimer(startedAt);
     } else if (this.s.saveAsLastMode === 'subset') {
       if (!this._hasAnyAnswerInSession()) return;
@@ -1737,12 +1893,20 @@ const Session = {
     const q = this.currentQuestion();
     App.topMeta.textContent = `${this.s.title} · ${this.s.currentIndex + 1} / ${this.s.order.length}`;
 
-    // Если на этот вопрос уже отвечали в прошлом, восстановим состояние
-    // (важно для возврата «Назад» и для палитры — чтобы видно было результат).
+    // Восстановление UI при возврате «Назад» или перезагрузке страницы.
+    //   • Экзамен: восстанавливаем ТОЛЬКО из изолированных ответов текущей
+    //     попытки (s.examAnswers). Глобальный Store.data.answers НЕ трогаем,
+    //     иначе ответы из марафона/разделов «протекли» бы в экзамен и
+    //     пометили вопросы как отвеченные.
+    //   • Practice (марафон/разделы): восстанавливаем из Store.getAnswer,
+    //     как и раньше.
     if (!this.ui && !this.s.freshStart) {
-      const stored = Store.getAnswer(q.id);
-      if (stored) {
-        this.ui = this.uiFromStored(q, stored);
+      if (this.s.kind === 'exam') {
+        const stored = this.s.examAnswers && this.s.examAnswers[q.id];
+        if (stored) this.ui = this.uiFromStored(q, stored);
+      } else {
+        const stored = Store.getAnswer(q.id);
+        if (stored) this.ui = this.uiFromStored(q, stored);
       }
     }
 
@@ -1843,7 +2007,11 @@ const Session = {
     else if (q.type === 'sequence') tagsLeft.appendChild(el('span', { class: 'question-tag seq' }, 'последовательность'));
     else tagsLeft.appendChild(el('span', { class: 'question-tag' }, 'один ответ'));
     meta.appendChild(tagsLeft);
-    meta.appendChild(el('span', { class: 'muted small' }, `#${q.id}`));
+    // Вместо #id показываем название раздела — пользователю информативнее.
+    const sectionLabel = q.section_title
+      ? q.section_title
+      : (q.section != null ? `Раздел ${q.section}` : '');
+    meta.appendChild(el('span', { class: 'muted small', title: `id ${q.id}` }, sectionLabel));
     card.appendChild(meta);
 
     // Картинка (если будет)
@@ -2069,7 +2237,15 @@ const Session = {
     }
     this.ui.checked = true;
     this.ui.status = status;
-    Store.recordAnswer(q.id, status, given);
+    if (this.s.kind === 'exam') {
+      // Экзамен: ответы изолированы в s.examAnswers (синхронизируются с lm.attemptAnswers).
+      // В глобальный Store.data.answers попадут только после finishExam().
+      if (!this.s.examAnswers) this.s.examAnswers = {};
+      this.s.examAnswers[q.id] = { status, given, ts: Date.now() };
+      this.persistLast();  // запишет lm.attemptAnswers и обновит сервер
+    } else {
+      Store.recordAnswer(q.id, status, given);
+    }
     this.renderCurrent();
   },
 
@@ -2145,14 +2321,19 @@ const Session = {
     } catch (e) {}
 
     Store.clearLastMode();  // сбрасываем сохранённый экзамен после завершения
+
+    // Изолированные ответы текущей попытки (могут отсутствовать, если время вышло
+    // и пользователь не успел ответить).
+    const examAnswers = this.s.examAnswers || {};
+
     const results = [];
     let correctCount = 0;
     // Разбивка по разделам: {sectionNumber: {title, total, correct, wrong}}
     const sectionsStats = {};
     for (const qid of this.s.order) {
       const q = getQuestion(qid);
-      const stored = Store.getAnswer(qid);
-      const given = stored ? stored.given : null;
+      const stored = examAnswers[qid];        // ← ответы ТОЛЬКО этой попытки
+      const given  = stored ? stored.given  : null;
       const status = stored ? stored.status : 'wrong'; // без ответа = неверно
       if (status === 'correct') correctCount++;
       results.push({ q, given, status, answered: !!stored });
@@ -2164,6 +2345,12 @@ const Session = {
       sectionsStats[sNum].total++;
       if (status === 'correct') sectionsStats[sNum].correct++;
       else sectionsStats[sNum].wrong++;
+    }
+
+    // Переносим ответы экзамена в общий Store.data.answers — чтобы они учитывались
+    // в «Работе над ошибками» и в палитре практики. Делаем это только при ЗАВЕРШЕНИИ.
+    for (const [qid, ans] of Object.entries(examAnswers)) {
+      Store.recordAnswer(parseInt(qid, 10), ans.status, ans.given);
     }
 
     // Пишем попытку в облако (если есть авторизация). Дубль защищён started_at в API.
@@ -2230,7 +2417,8 @@ const Session = {
             r.status === 'correct' ? '✓' : '✗'),
           el('span', { class: 'muted small' }, ` Вопрос ${idx + 1}`)
         ),
-        el('span', { class: 'muted small' }, `#${r.q.id}`)
+        el('span', { class: 'muted small', title: `id ${r.q.id}` },
+            r.q.section_title || (r.q.section != null ? `Раздел ${r.q.section}` : ''))
       ));
       if (r.q.image) {
         card.appendChild(el('img', {
