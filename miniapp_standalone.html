@@ -779,7 +779,7 @@ html, body { margin: 0; overscroll-behavior-y: none; }
 
 <header class="top" id="main-header" style="visibility:hidden;">
   <div class="top-inner">
-    <h1 class="top-title" onclick="App.goHome()">📚 Тренажёр ГОС</h1>
+    <h1 class="top-title" onclick="App.exitToHome()">📚 Тренажёр ГОС</h1>
     <div class="top-meta" id="topMeta"></div>
   </div>
 </header>
@@ -1062,8 +1062,19 @@ const App = {
   goHome() {
     this.state = null;
     // НЕ очищаем lastMode — чтобы можно было «Продолжить».
-    // Таймер НЕ останавливаем — пусть тикает в фоне пока экзамен активен.
+    // Таймер экрана экзамена останавливаем; на главной запустится свой.
+    clearExamTimer();
     this.renderHome();
+  },
+
+  // Единая точка выхода в меню: если активен экзамен и есть ответы — диалог,
+  // иначе обычный выход на главную. Используется кликом по логотипу/BackButton.
+  exitToHome() {
+    if (Session.s && Session.s.kind === 'exam') {
+      Session.handleExitExam();
+    } else {
+      this.goHome();
+    }
   },
 
   renderHome() {
@@ -1112,24 +1123,65 @@ const App = {
     }
 
     // Продолжить экзамен (если есть активный с оставшимся временем)
+    // Показываем карточку даже без ответов — таймер уже тикает с момента старта.
     const _examLm = Store.data.lastMode;
-    const _examHasProgress = _examLm && _examLm.type === 'exam' && _examLm.order &&
-      _examLm.order.some(id => Store.getAnswer(id));
-    if (_examHasProgress) {
-      const _elapsed   = Date.now() - (_examLm.startedAt || Date.now());
+    const _examActive = _examLm && _examLm.type === 'exam' && _examLm.order && _examLm.startedAt;
+    if (_examActive) {
+      const _elapsed   = Date.now() - _examLm.startedAt;
       const _remaining = 3600000 - _elapsed;
       if (_remaining > 0) {
+        // Сколько ответов уже дано — для подсказки в карточке
+        const _answered = _examLm.order.filter(id => Store.getAnswer(id)).length;
+        const _total    = _examLm.order.length;
+        // Текстовый узел с оставшимся временем — будем обновлять его раз в секунду
+        const timerText = document.createTextNode(
+          `Осталось времени: ${_fmtTimer(_remaining)} · Отвечено: ${_answered} из ${_total}`
+        );
+        const examMeta = el('div', { class: 'muted small' });
+        examMeta.appendChild(timerText);
+
         this.root.appendChild(el('div', { class: 'question-card', style: 'margin-bottom:18px;' },
           el('div', { class: 'row between' },
             el('div', {},
               el('div', { style: 'font-weight:600;margin-bottom:4px;' }, '🎯 Продолжить экзамен'),
-              el('div', { class: 'muted small' },
-                `Осталось времени: ${_fmtTimer(_remaining)} · Вопрос ${_examLm.currentIndex + 1} из ${_examLm.order.length}`)
+              examMeta
             ),
             el('button', { class: 'btn-primary', onclick: () => Mode.startExam() }, 'Продолжить')
           )
         ));
+
+        // Запускаем (или перезапускаем) живой таймер главной
+        if (_homeTimerInterval) { clearInterval(_homeTimerInterval); _homeTimerInterval = null; }
+        _homeTimerInterval = setInterval(() => {
+          const lm = Store.data.lastMode;
+          if (!lm || lm.type !== 'exam' || !lm.startedAt) {
+            clearInterval(_homeTimerInterval); _homeTimerInterval = null;
+            return;
+          }
+          const rem = 3600000 - (Date.now() - lm.startedAt);
+          if (rem <= 0) {
+            // Время вышло — чистим lastMode и перерисовываем главный экран
+            clearInterval(_homeTimerInterval); _homeTimerInterval = null;
+            Store.clearLastMode();
+            if (App.state === null) App.renderHome();
+            return;
+          }
+          if (!document.body.contains(timerText)) {
+            // Узел больше не в DOM (ушли с главной) — снимаем интервал
+            clearInterval(_homeTimerInterval); _homeTimerInterval = null;
+            return;
+          }
+          const ansCount = lm.order.filter(id => Store.getAnswer(id)).length;
+          timerText.nodeValue = `Осталось времени: ${_fmtTimer(rem)} · Отвечено: ${ansCount} из ${lm.order.length}`;
+        }, 1000);
+      } else {
+        // Время вышло, но lastMode ещё есть — почистим
+        Store.clearLastMode();
+        if (_homeTimerInterval) { clearInterval(_homeTimerInterval); _homeTimerInterval = null; }
       }
+    } else {
+      // Нет активного экзамена — снимаем интервал, если был
+      if (_homeTimerInterval) { clearInterval(_homeTimerInterval); _homeTimerInterval = null; }
     }
 
     this.root.appendChild(el('h2', {}, 'Выберите режим'));
@@ -1284,6 +1336,7 @@ function renderProgressNum(stats) {
 
 /* ── Таймер экзамена ──────────────────────────────────────── */
 let _examTimerInterval = null;
+let _homeTimerInterval = null;  // тикающий таймер карточки «Продолжить экзамен» на главной
 
 function _fmtTimer(ms) {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -1312,14 +1365,8 @@ function clearExamTimer() {
 }
 
 const Mode = {
-  // Марафон вопросов: все вопросы по порядку, прогресс сохраняется в lastMode
-  _firstUnanswered(order) {
-    for (let i = 0; i < order.length; i++) {
-      if (!Store.getAnswer(order[i])) return i;
-    }
-    return 0;
-  },
-
+  // Марафон вопросов: все вопросы перемешиваются при каждом входе.
+  // lastMode сохраняется ТОЛЬКО после первого ответа (в Session.persistLast).
   _firstUnanswered(order) {
     // Первый вопрос без ответа; если все отвечены — с начала
     for (let i = 0; i < order.length; i++) {
@@ -1329,17 +1376,16 @@ const Mode = {
   },
 
   startAll() {
+    // Новый перемешанный порядок при каждом входе (lastMode пока не трогаем —
+    // он запишется в persistLast() после первого ответа).
     const order = shuffle(QUESTIONS.map(q => q.id));
-    const startIdx = this._firstUnanswered(order);
-    const session = {
+    Session.start({
       kind: 'practice',
       title: 'Марафон вопросов',
       order,
-      currentIndex: startIdx,
+      currentIndex: 0,
       saveAsLastMode: 'all',
-    };
-    Store.setLastMode({ type: 'all', currentIndex: startIdx, order, ts: Date.now() });
-    Session.start(session);
+    });
   },
 
   resumeAll() {
@@ -1363,17 +1409,19 @@ const Mode = {
     });
   },
 
-  // Экзамен: 40 случайных, проверка в конце. Сохраняет состояние после первого ответа.
+  // Экзамен: 40 случайных, проверка в конце.
+  // startedAt и lastMode фиксируются СРАЗУ при старте — таймер идёт с момента входа.
+  // Если есть активный lastMode экзамена с живым временем — продолжаем его
+  // (это работает и при клике на плитку «Экзамен», и на карточку «Продолжить экзамен»).
   startExam() {
     clearExamTimer();
     const lm = Store.data.lastMode;
-    const hasExamProgress = lm && lm.type === 'exam' && lm.order &&
-      lm.order.some(id => Store.getAnswer(id));
-    if (hasExamProgress) {
-      const elapsed   = Date.now() - (lm.startedAt || Date.now());
+    const isActiveExam = lm && lm.type === 'exam' && lm.order && lm.startedAt;
+    if (isActiveExam) {
+      const elapsed   = Date.now() - lm.startedAt;
       const remaining = 3600000 - elapsed;
       if (remaining > 0) {
-        // Восстанавливаем экзамен
+        // Продолжаем существующий экзамен (с ответами или без)
         Session.start({ kind: 'exam', title: 'Экзамен из 40 случайных вопросов',
           order: lm.order, currentIndex: lm.currentIndex || 0,
           startedAt: lm.startedAt, saveAsLastMode: 'exam' });
@@ -1383,12 +1431,14 @@ const Mode = {
       // Время вышло — сбрасываем и начинаем новый
       Store.clearLastMode();
     }
-    // Новый экзамен
-    const ids       = shuffle(QUESTIONS.map(q => q.id)).slice(0, Math.min(40, QUESTIONS.length));
+    // Новый экзамен: фиксируем startedAt и lastMode СРАЗУ — таймер сразу тикает,
+    // карточка «Продолжить экзамен» появится на главной, даже если нет ответов.
+    const ids = shuffle(QUESTIONS.map(q => q.id)).slice(0, Math.min(40, QUESTIONS.length));
     const startedAt = Date.now();
+    Store.setLastMode({ type: 'exam', currentIndex: 0, order: ids, startedAt, ts: Date.now() });
     Session.start({ kind: 'exam', title: 'Экзамен из 40 случайных вопросов',
       order: ids, currentIndex: 0, startedAt, saveAsLastMode: 'exam' });
-    // Таймер запустим после первого ответа (в persistLast)
+    startExamTimer(startedAt);
   },
 
   // Произвольный сабсет — режим практики
@@ -1493,15 +1543,29 @@ const Session = {
     this.renderCurrent();
   },
 
+  // Проверяет, есть ли хотя бы один сохранённый ответ среди вопросов сессии
+  _hasAnyAnswerInSession() {
+    if (!this.s || !this.s.order) return false;
+    for (const qid of this.s.order) {
+      if (Store.getAnswer(qid)) return true;
+    }
+    return false;
+  },
+
   persistLast() {
+    // В режимах all/subset сохраняем lastMode только когда уже есть
+    // хотя бы один ответ — это даёт «свежее перемешивание» при каждом входе
+    // до первого ответа.
     if (this.s.saveAsLastMode === 'all') {
+      if (!this._hasAnyAnswerInSession()) return;
       Store.setLastMode({ type: 'all', currentIndex: this.s.currentIndex, order: this.s.order, ts: Date.now() });
     } else if (this.s.saveAsLastMode === 'exam') {
-      const startedAt = this.s.startedAt || Date.now();
+      // Экзамен: lastMode уже создан при startExam() со startedAt. Просто обновляем currentIndex.
+      const startedAt = this.s.startedAt;
       Store.setLastMode({ type: 'exam', currentIndex: this.s.currentIndex, order: this.s.order, startedAt, ts: Date.now() });
-      // Запускаем таймер при первом сохранении
       if (!_examTimerInterval) startExamTimer(startedAt);
     } else if (this.s.saveAsLastMode === 'subset') {
+      if (!this._hasAnyAnswerInSession()) return;
       Store.setLastMode({ type: 'subset', title: this.s.subsetTitle, currentIndex: this.s.currentIndex, order: this.s.order, ts: Date.now() });
     }
   },
@@ -1520,13 +1584,17 @@ const Session = {
     }
 
     App.root.innerHTML = '';
-    App.root.appendChild(el('div', { class: 'row between' },
-      el('button', { class: 'btn-ghost', onclick: () => App.goHome() }, '← Меню'),
-      this.s.kind === 'exam'
-        ? el('span', { id: 'exam-timer', style: 'font-size:14px;font-weight:600;' },
-            '⏱ ' + _fmtTimer(3600000 - (Date.now() - (this.s.startedAt || Date.now()))))
-        : el('div', { class: 'muted small' }, q.topic ? `${q.topic}. ${q.topic_title}` : (q.section_title || ''))
-    ));
+    // Верхняя панель: для экзамена — умная кнопка «Меню» (диалог если есть ответы),
+    // и таймер. Для остальных режимов — обычная кнопка и метаданные темы.
+    const isExam = this.s.kind === 'exam';
+    const headerLeft = isExam
+      ? el('button', { class: 'btn-ghost', onclick: () => this.handleExitExam() }, '← Меню')
+      : el('button', { class: 'btn-ghost', onclick: () => App.goHome() }, '← Меню');
+    const headerRight = isExam
+      ? el('span', { id: 'exam-timer', style: 'font-size:14px;font-weight:600;' },
+          '⏱ ' + _fmtTimer(3600000 - (Date.now() - this.s.startedAt)))
+      : el('div', { class: 'muted small' }, q.topic ? `${q.topic}. ${q.topic_title}` : (q.section_title || ''));
+    App.root.appendChild(el('div', { class: 'row between' }, headerLeft, headerRight));
 
     // Прогресс-бар по сессии
     const progress = Math.round((this.s.currentIndex + 1) / this.s.order.length * 100);
@@ -1835,6 +1903,70 @@ const Session = {
     this.ui.status = status;
     Store.recordAnswer(q.id, status, given);
     this.renderCurrent();
+  },
+
+  // Обработка нажатия «← Меню» внутри экзамена.
+  // Если ни на один вопрос ещё не ответили — просто выходим (lastMode не сохранён,
+  // экзамен «не начинался»). Если есть ответы — показываем диалог с выбором.
+  handleExitExam() {
+    if (!this._hasAnyAnswerInSession()) {
+      // Сбрасываем сессию без сохранения — следующий вход даст новый набор
+      App.goHome();
+      return;
+    }
+    this._showExitExamDialog();
+  },
+
+  _showExitExamDialog() {
+    const overlay = el('div', { class: 'modal-overlay', id: 'exit-exam-modal' });
+    overlay.addEventListener('click', e => { if (e.target === overlay) closeIt(); });
+    const modal = el('div', { class: 'modal' });
+
+    const closeIt = () => { try { document.body.removeChild(overlay); } catch (e) {} };
+
+    modal.appendChild(el('div', { class: 'modal-header' },
+      el('h3', { class: 'modal-title' }, 'Выйти из экзамена?'),
+      el('button', { class: 'modal-close', onclick: closeIt, title: 'Закрыть' }, '×')
+    ));
+
+    modal.appendChild(el('div', { class: 'modal-hint' },
+      'Таймер уже идёт. Что вы хотите сделать?'
+    ));
+
+    const actions = el('div', { class: 'modal-actions', style: 'flex-direction:column;gap:10px;align-items:stretch;' });
+
+    // Вариант 1: выйти с сохранением — таймер продолжает идти на главном экране
+    actions.appendChild(el('button', {
+      class: 'btn-primary',
+      style: 'width:100%;',
+      onclick: () => {
+        closeIt();
+        // Таймер уже сохранён в lastMode (startedAt). На главной он будет тикать.
+        // _examTimerInterval остановим — на главной запустим свой.
+        clearExamTimer();
+        App.goHome();
+      }
+    }, '⏸ Выйти, таймер продолжит идти'));
+
+    // Вариант 2: завершить экзамен — посчитать результат
+    actions.appendChild(el('button', {
+      class: 'btn-danger',
+      style: 'width:100%;',
+      onclick: () => {
+        closeIt();
+        this.finishExam();
+      }
+    }, '🏁 Завершить экзамен и получить результат'));
+
+    // Вариант 3: остаться
+    actions.appendChild(el('button', {
+      style: 'width:100%;',
+      onclick: closeIt,
+    }, 'Отмена — продолжить решать'));
+
+    modal.appendChild(actions);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
   },
 
   finishExam() {
@@ -2420,7 +2552,7 @@ Store.resetWithApi = function() {
 };
 
 /* BackButton */
-if (tg?.BackButton) { tg.BackButton.onClick(() => App.goHome()); }
+if (tg?.BackButton) { tg.BackButton.onClick(() => App.exitToHome()); }
 const _gh = App.goHome.bind(App);
 App.goHome = function() { _gh(); setBackBtn(false); };
 ['startAll','startExam','resumeAll','startSection'].forEach(fn => {
