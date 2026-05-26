@@ -1193,16 +1193,16 @@ const App = {
       _examActive = false;
     }
     if (_examActive) {
-      const _elapsed   = Date.now() - _examLm.startedAt;
-      const _remaining = 3600000 - _elapsed;
+      const _remaining = examRemainingMs(_examLm);
       if (_remaining > 0) {
         // Считаем ответы из изолированного хранилища попытки (attemptAnswers).
-        // Глобальный Store.data.answers — НЕ источник для экзамена.
         const _attempt  = _examLm.attemptAnswers || {};
         const _answered = Object.keys(_attempt).length;
         const _total    = _examLm.order.length;
+        const _isPaused = !!_examLm.paused;
+        const _prefix   = _isPaused ? '⏸ На паузе · ' : '';
         const timerText = document.createTextNode(
-          `Осталось времени: ${_fmtTimer(_remaining)} · Отвечено: ${_answered} из ${_total}`
+          `${_prefix}Осталось времени: ${_fmtTimer(_remaining)} · Отвечено: ${_answered} из ${_total}`
         );
         const examMeta = el('div', { class: 'muted small' });
         examMeta.appendChild(timerText);
@@ -1217,37 +1217,42 @@ const App = {
           )
         ));
 
-        // Запускаем (или перезапускаем) живой таймер главной
+        // setInterval нужен только если экзамен НЕ на паузе. На паузе время не меняется.
         if (_homeTimerInterval) { clearInterval(_homeTimerInterval); _homeTimerInterval = null; }
-        _homeTimerInterval = setInterval(() => {
-          const lm = Store.data.lastMode;
-          if (!lm || lm.type !== 'exam' || !lm.startedAt) {
-            clearInterval(_homeTimerInterval); _homeTimerInterval = null;
-            return;
-          }
-          const rem = 3600000 - (Date.now() - lm.startedAt);
-          if (rem <= 0) {
-            // Время вышло — чистим lastMode и перерисовываем главный экран
-            clearInterval(_homeTimerInterval); _homeTimerInterval = null;
-            Store.clearLastMode();
-            if (App.state === null) App.renderHome();
-            return;
-          }
-          if (!document.body.contains(timerText)) {
-            // Узел больше не в DOM (ушли с главной) — снимаем интервал
-            clearInterval(_homeTimerInterval); _homeTimerInterval = null;
-            return;
-          }
-          const ansCount = Object.keys(lm.attemptAnswers || {}).length;
-          timerText.nodeValue = `Осталось времени: ${_fmtTimer(rem)} · Отвечено: ${ansCount} из ${lm.order.length}`;
-        }, 1000);
+        if (!_isPaused) {
+          _homeTimerInterval = setInterval(() => {
+            const lm = Store.data.lastMode;
+            if (!lm || lm.type !== 'exam' || !lm.startedAt) {
+              clearInterval(_homeTimerInterval); _homeTimerInterval = null;
+              return;
+            }
+            // Если за это время экзамен поставили на паузу (например, через бот) —
+            // перерисуем карточку, чтобы показать индикатор паузы
+            if (lm.paused) {
+              clearInterval(_homeTimerInterval); _homeTimerInterval = null;
+              if (App.state === null) App.renderHome();
+              return;
+            }
+            const rem = examRemainingMs(lm);
+            if (rem <= 0) {
+              clearInterval(_homeTimerInterval); _homeTimerInterval = null;
+              Store.clearLastMode();
+              if (App.state === null) App.renderHome();
+              return;
+            }
+            if (!document.body.contains(timerText)) {
+              clearInterval(_homeTimerInterval); _homeTimerInterval = null;
+              return;
+            }
+            const ansCount = Object.keys(lm.attemptAnswers || {}).length;
+            timerText.nodeValue = `Осталось времени: ${_fmtTimer(rem)} · Отвечено: ${ansCount} из ${lm.order.length}`;
+          }, 1000);
+        }
       } else {
-        // Время вышло, но lastMode ещё есть — почистим
         Store.clearLastMode();
         if (_homeTimerInterval) { clearInterval(_homeTimerInterval); _homeTimerInterval = null; }
       }
     } else {
-      // Нет активного экзамена — снимаем интервал, если был
       if (_homeTimerInterval) { clearInterval(_homeTimerInterval); _homeTimerInterval = null; }
     }
 
@@ -1355,18 +1360,56 @@ const App = {
       'Начните вводить текст вопроса — список будет обновляться в реальном времени.'
     ));
 
-    // Поле ввода
+    // Поле ввода с обвязкой против "залипающей" клавиатуры iOS.
+    // Контейнер делает поле и кнопку "✕" одним блоком.
+    const inputWrap = el('div', { style: 'position:relative;width:100%;' });
     const input = el('input', {
-      type: 'text',
-      placeholder: 'Например: денежный поток, ERP, BPMN…',
-      style: 'width:100%;padding:12px 14px;font-size:15px;border-radius:10px;'
+      type: 'search',                 // на iOS даёт кнопку "Search" + крестик очистки
+      inputmode: 'search',
+      enterkeyhint: 'search',
+      placeholder: 'Например: денежный поток, ERP, NPV…',
+      style: 'width:100%;padding:12px 80px 12px 14px;font-size:16px;border-radius:10px;'
            + 'border:1px solid var(--border);background:var(--bg);color:var(--fg);'
-           + 'box-sizing:border-box;outline:none;',
+           + 'box-sizing:border-box;outline:none;-webkit-appearance:none;appearance:none;',
       autocomplete: 'off',
-      autofocus: true,
+      autocorrect: 'off',
+      autocapitalize: 'off',
       spellcheck: 'false',
+      // НЕ autofocus — на iOS это сразу открывает клавиатуру при заходе на экран,
+      // что многих раздражает. Юзер сам тапнет, когда захочет.
     });
-    this.root.appendChild(input);
+    // Кнопка "Готово" — снимает фокус с поля. На iOS это закрывает клавиатуру.
+    const doneBtn = el('button', {
+      type: 'button',
+      style: 'position:absolute;right:6px;top:50%;transform:translateY(-50%);'
+           + 'background:var(--accent);color:#fff;border:none;border-radius:6px;'
+           + 'padding:6px 12px;font-size:13px;cursor:pointer;display:none;',
+      onclick: () => {
+        input.blur();
+        // На iOS дополнительно прокрутим страницу, чтобы вернуть viewport
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      },
+    }, 'Готово');
+    // Показываем "Готово" только когда поле активно
+    input.addEventListener('focus', () => { doneBtn.style.display = 'block'; });
+    input.addEventListener('blur',  () => { setTimeout(() => doneBtn.style.display = 'none', 100); });
+    // Enter тоже закрывает клавиатуру
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    });
+    inputWrap.appendChild(input);
+    inputWrap.appendChild(doneBtn);
+    this.root.appendChild(inputWrap);
+
+    // По скроллу списка — снимаем фокус, чтобы клавиатура не закрывала результаты
+    // (это типичный паттерн iOS-приложений).
+    let scrollBlurTimer = null;
+    window.addEventListener('scroll', () => {
+      if (document.activeElement === input) {
+        clearTimeout(scrollBlurTimer);
+        scrollBlurTimer = setTimeout(() => input.blur(), 50);
+      }
+    }, { passive: true });
 
     const status = el('div', { class: 'muted small', style: 'margin:10px 0 4px;' }, '');
     this.root.appendChild(status);
@@ -1670,6 +1713,7 @@ function renderProgressNum(stats) {
 /* ── Таймер экзамена ──────────────────────────────────────── */
 let _examTimerInterval = null;
 let _homeTimerInterval = null;  // тикающий таймер карточки «Продолжить экзамен» на главной
+const EXAM_DURATION_MS = 3600000;  // 1 час
 
 function _fmtTimer(ms) {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -1678,12 +1722,73 @@ function _fmtTimer(ms) {
   return String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
 }
 
-function startExamTimer(startedAt) {
+/**
+ * Считает оставшееся время экзамена с учётом паузы.
+ *
+ * Модель lastMode.exam:
+ *   - startedAt:   ms (когда стартовал в первый раз, для совместимости)
+ *   - remainingMs: остаток времени на момент последней остановки/возобновления.
+ *                  Если нет — вычисляем из startedAt (старый формат, без паузы).
+ *   - paused:      true → таймер на паузе, считается от remainingMs (фиксированный)
+ *                  false/undefined → таймер идёт, надо вычесть (now - resumedAt)
+ *   - resumedAt:   ms момента последнего возобновления (или старта)
+ *                  Если нет — используем startedAt.
+ */
+function examRemainingMs(lm) {
+  if (!lm || lm.type !== 'exam') return 0;
+  // Если есть новая модель — используем её
+  if (typeof lm.remainingMs === 'number') {
+    if (lm.paused) return Math.max(0, lm.remainingMs);
+    const resumedAt = lm.resumedAt || lm.startedAt || Date.now();
+    return Math.max(0, lm.remainingMs - (Date.now() - resumedAt));
+  }
+  // Совместимость со старым форматом без паузы: считаем от startedAt
+  if (lm.startedAt) {
+    return Math.max(0, EXAM_DURATION_MS - (Date.now() - lm.startedAt));
+  }
+  return 0;
+}
+
+/** Поставить таймер экзамена на паузу. Обновляет lastMode и сохраняет. */
+function pauseExamTimer() {
+  const lm = Store.data.lastMode;
+  if (!lm || lm.type !== 'exam' || lm.paused) return;
+  const remaining = examRemainingMs(lm);
+  Store.setLastMode({
+    ...lm,
+    remainingMs: remaining,
+    paused:      true,
+    pausedAt:    Date.now(),
+    ts:          Date.now(),
+  });
+  clearExamTimer();
+  console.log('[exam] таймер поставлен на паузу, осталось:', _fmtTimer(remaining));
+}
+
+/** Снять таймер экзамена с паузы. Обновляет lastMode и запускает интервал. */
+function resumeExamTimer() {
+  const lm = Store.data.lastMode;
+  if (!lm || lm.type !== 'exam') return;
+  // Если был на паузе — продолжаем с зафиксированного остатка
+  // Если не был на паузе (старый формат или первый запуск) — берём текущий остаток
+  const remaining = examRemainingMs(lm);
+  Store.setLastMode({
+    ...lm,
+    remainingMs: remaining,
+    paused:      false,
+    resumedAt:   Date.now(),
+    ts:          Date.now(),
+  });
+  startExamTimer();
+  console.log('[exam] таймер возобновлён, осталось:', _fmtTimer(remaining));
+}
+
+function startExamTimer(/* legacy startedAt — игнорируется, читаем lastMode */) {
   clearExamTimer();
   _examTimerInterval = setInterval(() => {
     const el = document.getElementById('exam-timer');
     if (!el) return;
-    const remaining = 3600000 - (Date.now() - startedAt);
+    const remaining = examRemainingMs(Store.data.lastMode);
     el.textContent = '⏱ ' + _fmtTimer(remaining);
     el.style.color = remaining < 300000 ? 'var(--wrong,#e74c3c)' : '';
     if (remaining <= 0) {
@@ -1743,9 +1848,8 @@ const Mode = {
   },
 
   // Экзамен: 40 случайных, проверка в конце.
-  // startedAt и lastMode фиксируются СРАЗУ при старте — таймер идёт с момента входа.
-  // Если есть активный lastMode экзамена с живым временем — продолжаем его
-  // (это работает и при клике на плитку «Экзамен», и на карточку «Продолжить экзамен»).
+  // Поддержка паузы: lastMode.paused=true → таймер заморожен на lastMode.remainingMs.
+  // При продолжении (нажатии "Продолжить") — снимаем паузу.
   startExam() {
     clearExamTimer();
     const lm = Store.data.lastMode;
@@ -1755,33 +1859,43 @@ const Mode = {
       console.log('[Mode.startExam] lastMode указывает на завершённый экзамен, чистим');
       Store.clearLastMode();
     } else if (isActiveExam) {
-      const elapsed   = Date.now() - lm.startedAt;
-      const remaining = 3600000 - elapsed;
+      const remaining = examRemainingMs(lm);
       if (remaining > 0) {
-        // Продолжаем существующий экзамен (с ответами или без).
-        // attemptAnswers — изолированные ответы текущей попытки экзамена.
+        // Продолжаем существующий экзамен.
+        // Если был на паузе — снимаем паузу (таймер пойдёт от текущего момента).
+        if (lm.paused) {
+          resumeExamTimer();
+        }
         Session.start({ kind: 'exam', title: 'Экзамен из 40 случайных вопросов',
           order: lm.order, currentIndex: lm.currentIndex || 0,
           startedAt: lm.startedAt, saveAsLastMode: 'exam',
           examAnswers: lm.attemptAnswers || {} });
-        startExamTimer(lm.startedAt);
+        // Если паузу не снимали (она уже была снята), стартовый таймер всё равно нужен
+        if (!_examTimerInterval) startExamTimer();
         return;
       }
       // Время вышло — сбрасываем и начинаем новый
       Store.clearLastMode();
     }
-    // Новый экзамен: фиксируем startedAt и lastMode СРАЗУ — таймер сразу тикает,
-    // карточка «Продолжить экзамен» появится на главной, даже если нет ответов.
-    // attemptAnswers пустой — экзамен начинается с чистого листа, не зависит от того,
-    // что пользователь раньше отвечал в марафоне или по разделам.
+    // Новый экзамен: фиксируем startedAt и lastMode СРАЗУ — таймер сразу тикает.
+    // remainingMs/resumedAt дают точку отсчёта, paused=false — таймер активен.
     const ids = shuffle(QUESTIONS.map(q => q.id)).slice(0, Math.min(40, QUESTIONS.length));
     const startedAt = Date.now();
-    Store.setLastMode({ type: 'exam', currentIndex: 0, order: ids, startedAt,
-                        attemptAnswers: {}, ts: Date.now() });
+    Store.setLastMode({
+      type:           'exam',
+      currentIndex:   0,
+      order:          ids,
+      startedAt,
+      resumedAt:      startedAt,
+      remainingMs:    EXAM_DURATION_MS,
+      paused:         false,
+      attemptAnswers: {},
+      ts:             startedAt,
+    });
     Session.start({ kind: 'exam', title: 'Экзамен из 40 случайных вопросов',
       order: ids, currentIndex: 0, startedAt, saveAsLastMode: 'exam',
       examAnswers: {} });
-    startExamTimer(startedAt);
+    startExamTimer();
   },
 
   // Произвольный сабсет — режим практики
@@ -1909,18 +2023,27 @@ const Session = {
       if (!this._hasAnyAnswerInSession()) return;
       Store.setLastMode({ type: 'all', currentIndex: this.s.currentIndex, order: this.s.order, ts: Date.now() });
     } else if (this.s.saveAsLastMode === 'exam') {
-      // Экзамен: lastMode уже создан при startExam() со startedAt.
-      // Обновляем currentIndex и изолированные ответы попытки (attemptAnswers).
+      // Экзамен: lastMode уже создан при startExam(). При обновлении сохраняем
+      // поля паузы (paused, remainingMs, resumedAt, pausedAt) — иначе сброс ответа
+      // снимет паузу неявно. Берём их из текущего lastMode, либо подразумеваем
+      // "идущий с нормальным таймером".
+      const prev = Store.data.lastMode || {};
       const startedAt = this.s.startedAt;
       Store.setLastMode({
         type:           'exam',
         currentIndex:   this.s.currentIndex,
         order:          this.s.order,
         startedAt,
+        // Поля паузы (берём из предыдущего lastMode, если есть)
+        paused:         prev.paused || false,
+        remainingMs:    typeof prev.remainingMs === 'number' ? prev.remainingMs : EXAM_DURATION_MS,
+        resumedAt:      prev.resumedAt || startedAt,
+        pausedAt:       prev.pausedAt,
         attemptAnswers: this.s.examAnswers || {},
         ts:             Date.now(),
       });
-      if (!_examTimerInterval) startExamTimer(startedAt);
+      // Запускаем таймер только если экзамен НЕ на паузе
+      if (!_examTimerInterval && !prev.paused) startExamTimer();
     } else if (this.s.saveAsLastMode === 'subset') {
       if (!this._hasAnyAnswerInSession()) return;
       Store.setLastMode({ type: 'subset', title: this.s.subsetTitle, currentIndex: this.s.currentIndex, order: this.s.order, ts: Date.now() });
@@ -1957,7 +2080,7 @@ const Session = {
       : el('button', { class: 'btn-ghost', onclick: () => App.goHome() }, '← Меню');
     const headerRight = isExam
       ? el('span', { id: 'exam-timer', style: 'font-size:14px;font-weight:600;' },
-          '⏱ ' + _fmtTimer(3600000 - (Date.now() - this.s.startedAt)))
+          '⏱ ' + _fmtTimer(examRemainingMs(Store.data.lastMode)))
       : el('div', { class: 'muted small' }, q.topic ? `${q.topic}. ${q.topic_title}` : (q.section_title || ''));
     App.root.appendChild(el('div', { class: 'row between' }, headerLeft, headerRight));
 
@@ -2288,11 +2411,14 @@ const Session = {
   },
 
   // Обработка нажатия «← Меню» внутри экзамена.
-  // Если ни на один вопрос ещё не ответили — просто выходим (lastMode не сохранён,
-  // экзамен «не начинался»). Если есть ответы — показываем диалог с выбором.
+  // Если ни на один вопрос ещё не ответили — просто ставим на паузу и выходим
+  // (это симметрично поведению бота "Сохранить и выйти").
+  // Если есть ответы — показываем диалог с выбором: пауза / завершить / отмена.
   handleExitExam() {
     if (!this._hasAnyAnswerInSession()) {
-      // Сбрасываем сессию без сохранения — следующий вход даст новый набор
+      // Без диалога: ставим на паузу и уходим. Юзер сможет вернуться позже
+      // через карточку "Продолжить экзамен" на главной.
+      pauseExamTimer();
       App.goHome();
       return;
     }
@@ -2306,15 +2432,30 @@ const Session = {
     const modal = el('div', { class: 'modal' });
 
     modal.appendChild(el('div', { class: 'modal-header' },
-      el('h3', { class: 'modal-title' }, 'Завершить экзамен?'),
+      el('h3', { class: 'modal-title' }, 'Выйти из экзамена?'),
       el('button', { class: 'modal-close', onclick: closeIt, title: 'Закрыть' }, '×')
     ));
 
+    // Покажем оставшееся время в подсказке — чтобы было понятно, сколько уходит на паузу
+    const lm = Store.data.lastMode;
+    const remaining = examRemainingMs(lm);
     modal.appendChild(el('div', { class: 'modal-hint' },
-      'Если хочешь увидеть результат сейчас — нажми «Завершить». Иначе экзамен можно продолжить.'
+      `Осталось времени: ${_fmtTimer(remaining)}. Можно поставить таймер на паузу и вернуться позже, ` +
+      `или сразу завершить экзамен и посмотреть результат.`
     ));
 
     const actions = el('div', { class: 'modal-actions', style: 'flex-direction:column;gap:10px;align-items:stretch;' });
+
+    // Сохранить и выйти (пауза) — таймер замирает до возврата
+    actions.appendChild(el('button', {
+      class: 'btn-primary',
+      style: 'width:100%;',
+      onclick: () => {
+        closeIt();
+        pauseExamTimer();   // фиксируем remainingMs и ставим paused=true
+        App.goHome();
+      }
+    }, '⏸ Сохранить и выйти (таймер на паузе)'));
 
     // Завершить экзамен — посчитать результат и записать в историю
     actions.appendChild(el('button', {
@@ -2324,7 +2465,7 @@ const Session = {
         closeIt();
         this.finishExam();
       }
-    }, '🏁 Завершить экзамен и посмотреть результат'));
+    }, '🏁 Завершить и посмотреть результат'));
 
     // Остаться
     actions.appendChild(el('button', {
