@@ -1294,6 +1294,9 @@ const Mode = {
   resumeAll() {
     const lm = Store.data.lastMode;
     if (!lm) return this.startAll();
+    // Если ответов нет (после сброса) — startAll с перемешиванием
+    const hasAnyAnswer = lm.order && lm.order.some(id => Store.getAnswer(id));
+    if (!hasAnyAnswer) return this.startAll();
     // Ищем первый неотвеченный начиная с сохранённой позиции
     const saved = lm.currentIndex || 0;
     let startIdx = saved;
