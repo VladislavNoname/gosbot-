@@ -1165,7 +1165,13 @@ const App = {
     // Продолжить экзамен (если есть активный с оставшимся временем)
     // Показываем карточку даже без ответов — таймер уже тикает с момента старта.
     const _examLm = Store.data.lastMode;
-    const _examActive = _examLm && _examLm.type === 'exam' && _examLm.order && _examLm.startedAt;
+    let _examActive = _examLm && _examLm.type === 'exam' && _examLm.order && _examLm.startedAt;
+    // Если экзамен с таким started_at уже завершён локально — игнорируем.
+    if (_examActive && isFinalizedExam(_examLm.startedAt)) {
+      console.log('[renderHome] чистим lastMode завершённого экзамена', _examLm.startedAt);
+      Store.clearLastMode();
+      _examActive = false;
+    }
     if (_examActive) {
       const _elapsed   = Date.now() - _examLm.startedAt;
       const _remaining = 3600000 - _elapsed;
@@ -1555,7 +1561,11 @@ const Mode = {
     clearExamTimer();
     const lm = Store.data.lastMode;
     const isActiveExam = lm && lm.type === 'exam' && lm.order && lm.startedAt;
-    if (isActiveExam) {
+    // Защита: если этот started_at уже в списке финализированных — игнорируем
+    if (isActiveExam && isFinalizedExam(lm.startedAt)) {
+      console.log('[Mode.startExam] lastMode указывает на завершённый экзамен, чистим');
+      Store.clearLastMode();
+    } else if (isActiveExam) {
       const elapsed   = Date.now() - lm.startedAt;
       const remaining = 3600000 - elapsed;
       if (remaining > 0) {
@@ -2099,6 +2109,21 @@ const Session = {
     const startedAt = (Store.data.lastMode && Store.data.lastMode.startedAt)
                     || this.s.startedAt
                     || Date.now();
+
+    // Помечаем этот started_at как "финализированный" — чтобы при возможной
+    // расовой синхронизации с сервером (если придёт устаревший last_mode с тем же
+    // started_at) мы могли его распознать и не открыть завершённый экзамен заново.
+    try {
+      const raw = localStorage.getItem('gosexam_finalized_exams_v1') || '[]';
+      const finalized = JSON.parse(raw);
+      if (!finalized.includes(startedAt)) {
+        finalized.push(startedAt);
+        // Храним только последние 20, чтобы не разрастался
+        while (finalized.length > 20) finalized.shift();
+        localStorage.setItem('gosexam_finalized_exams_v1', JSON.stringify(finalized));
+      }
+    } catch (e) {}
+
     Store.clearLastMode();  // сбрасываем сохранённый экзамен после завершения
     const results = [];
     let correctCount = 0;
@@ -2135,9 +2160,8 @@ const Session = {
             .sort((a, b) => a.number - b.number),
         },
       };
-      saveExamAttempt(attempt);  // fire-and-forget, см. ниже
-      // Локальный кэш истории — чтобы экран «История» работал даже без сети
-      ExamHistory.add(attempt);
+      saveExamAttempt(attempt);  // fire-and-forget
+      ExamHistory.add(attempt);  // локальный кэш
     } catch (e) {
       console.warn('saveExamAttempt failed:', e);
     }
@@ -2686,13 +2710,27 @@ Store.loadFromCloud = async function(cb) {
         if (!loc || (v.ts||0) >= (loc.ts||0)) merged[id] = v;
       }
       Store.data.answers = merged;
-      if (data.last_mode) {
-        const apiTs = data.last_mode.ts || 0;
-        const locTs = Store.data.lastMode?.ts || 0;
-        if (apiTs >= locTs) Store.data.lastMode = data.last_mode;
+      // last_mode: облако — источник истины.
+      // Если сервер вернул last_mode=null (например, после завершения экзамена на другом
+      // устройстве) — мы тоже зануляем локальный. Иначе берём по более новому ts.
+      const apiLm = data.last_mode || null;
+      const locLm = Store.data.lastMode || null;
+      if (apiLm === null) {
+        Store.data.lastMode = null;
+      } else if (apiLm.type === 'exam' && isFinalizedExam(apiLm.startedAt)) {
+        // Этот экзамен уже завершён локально — не открываем его повторно.
+        // Активно зачищаем lastMode и на сервере тоже (через Store.save в конце).
+        console.log('[API] игнорируем устаревший lastMode завершённого экзамена',
+                    apiLm.startedAt);
+        Store.data.lastMode = null;
+      } else {
+        const apiTs = apiLm.ts || 0;
+        const locTs = locLm?.ts || 0;
+        if (apiTs >= locTs) Store.data.lastMode = apiLm;
       }
       _saveLocal();
-      console.log('[API] синхронизировано, ответов:', Object.keys(Store.data.answers).length);
+      console.log('[API] синхронизировано, ответов:', Object.keys(Store.data.answers).length,
+                  'lastMode:', Store.data.lastMode?.type || 'null');
     }
   } catch(e) {
     console.warn('[API] loadFromCloud ошибка:', e);
@@ -2710,6 +2748,18 @@ Store.resetWithApi = function() {
   _apiFetch(`/progress/${auth.userId}`, { method: 'DELETE' });
   console.log('[API] прогресс сброшен');
 };
+
+// Проверка: завершался ли уже экзамен с таким started_at локально.
+// Используется как страховка, чтобы устаревший lastMode из облака
+// (если по какой-то причине пришёл) не открыл уже завершённый экзамен заново.
+function isFinalizedExam(startedAt) {
+  if (!startedAt) return false;
+  try {
+    const raw = localStorage.getItem('gosexam_finalized_exams_v1') || '[]';
+    const list = JSON.parse(raw);
+    return Array.isArray(list) && list.includes(startedAt);
+  } catch (e) { return false; }
+}
 
 /* ── История экзаменов: API ── */
 
