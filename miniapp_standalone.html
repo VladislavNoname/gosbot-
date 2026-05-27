@@ -948,8 +948,9 @@ const Store = {
     pool[qid] = { status, given, ts: Date.now() };
 
     if (status === 'wrong') {
-      const setM = new Set(this.data.examMistakes || []);
-      setM.add(qid);
+      const qidNum = Number(qid);
+      const setM = new Set((this.data.examMistakes || []).map(Number));
+      setM.add(qidNum);
       this.data.examMistakes = Array.from(setM);
     }
 
@@ -2712,12 +2713,21 @@ const Session = {
         // 2) Глобальный пул examMistakes:
         //    - correct → qid УДАЛЯЕТСЯ (юзер закрыл этот вопрос)
         //    - wrong   → qid остаётся (надо отработать ещё)
-        // marathon/section пулы НЕ трогаем — они независимы.
+        // marathon/section пулы НЕ трогаем.
         if (status === 'correct') {
-          const setM = new Set(Store.data.examMistakes || []);
-          setM.delete(q.id);
+          // Приводим всё к Number — иначе Set.delete не сработает из-за
+          // несовпадения типов (например, если в localStorage qid сохранены
+          // как строки из-за старой версии кода).
+          const qidNum = Number(q.id);
+          const beforeArr = (Store.data.examMistakes || []).map(Number);
+          const setM = new Set(beforeArr);
+          const hadIt = setM.has(qidNum);
+          setM.delete(qidNum);
           Store.data.examMistakes = Array.from(setM);
-          Store.save();
+          console.log('[exam_mistakes] removing qid=' + qidNum,
+                      'before:', beforeArr.length, 'after:', setM.size,
+                      'hadIt:', hadIt);
+          Store.save();  // → POST /progress с обновлённым exam_mistakes (REPLACE)
         }
       } else {
         Store.recordAnswer(q.id, status, given, scope);
@@ -3473,9 +3483,10 @@ Store.loadFromCloud = async function(cb) {
       // Это критично для исправления: если юзер на устройстве A исправил qid
       // (qid удалён из локального examMistakes, ушёл на сервер) — устройство B
       // не должно его реанимировать через union. Поэтому REPLACE.
-      // На сервере merge при POST не применяется к exam_mistakes (REPLACE).
+      // ВАЖНО: нормализуем элементы к Number — иначе Set.delete не сработает
+      // если в сервере вдруг строки (страховка от старых записей).
       Store.data.examMistakes = Array.isArray(data.exam_mistakes)
-        ? data.exam_mistakes.slice()
+        ? data.exam_mistakes.map(Number)
         : (Store.data.examMistakes || []);
 
       // last_mode: облако — источник истины.
