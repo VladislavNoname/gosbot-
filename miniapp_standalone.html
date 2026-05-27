@@ -904,31 +904,118 @@ const STORAGE_KEY = 'gosexam_progress_v1';
    overrides — пользовательские правки вопросов поверх исходного JSON.
 */
 const Store = {
-  data: { answers: {}, lastMode: null, overrides: {} },
+  // data:
+  //   answers          — пул марафона
+  //   sectionAnswers   — пул разделов/тем
+  //   examUsed         — массив qid, использованных в экзаменах (для уникальности)
+  //   examMistakes     — массив qid, в которых юзер ошибся (или не ответил) в экзаменах.
+  //                       Источник для "Работы над ошибками" дополнительно к marathon/section wrong.
+  //                       При правильном повторе qid удаляется отсюда.
+  //   lastMode         — текущий режим (марафон/экзамен)
+  //   overrides        — пользовательские правки вопросов
+  data: { answers: {}, sectionAnswers: {}, examUsed: [], examMistakes: [],
+          lastMode: null, overrides: {} },
   load() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) this.data = JSON.parse(raw);
     } catch (e) { console.warn('Не удалось загрузить прогресс:', e); }
-    if (!this.data.answers) this.data.answers = {};
-    if (!this.data.overrides) this.data.overrides = {};
+    if (!this.data.answers)        this.data.answers = {};
+    if (!this.data.sectionAnswers) this.data.sectionAnswers = {};
+    if (!this.data.examUsed)       this.data.examUsed = [];
+    if (!this.data.examMistakes)   this.data.examMistakes = [];
+    if (!this.data.overrides)      this.data.overrides = {};
   },
   save() {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(this.data)); }
     catch (e) { console.warn('Не удалось сохранить прогресс:', e); }
   },
-  recordAnswer(qid, status, given) {
-    this.data.answers[qid] = { status, given, ts: Date.now() };
+  /** Получить ответ для qid в указанном scope. По умолчанию marathon (для обратной
+   * совместимости с многочисленными местами, где scope не указан явно).
+   * Для scope='exam_mistakes' возвращаем null — там хранятся только qid, без given;
+   * UI просто покажет вопрос без подсветки прошлого ответа. */
+  getAnswer(qid, scope = 'marathon') {
+    if (scope === 'exam_mistakes') return null;
+    const pool = scope === 'section' ? this.data.sectionAnswers : this.data.answers;
+    return pool[qid];
+  },
+  /** Записать ответ в указанный scope. Дополнительно, если ответ wrong — qid
+   *  ДОБАВЛЯЕТСЯ в examMistakes (Set без дублей). Correct examMistakes НЕ трогает:
+   *  пул ошибок — это архив всех неправильных ответов для отработки, его чистит
+   *  только пользователь вручную через кнопку «Очистить» или полным сбросом. */
+  recordAnswer(qid, status, given, scope = 'marathon') {
+    const pool = scope === 'section' ? this.data.sectionAnswers : this.data.answers;
+    pool[qid] = { status, given, ts: Date.now() };
+
+    if (status === 'wrong') {
+      const setM = new Set(this.data.examMistakes || []);
+      setM.add(qid);
+      this.data.examMistakes = Array.from(setM);
+    }
+
     this.save();
   },
-  getAnswer(qid) { return this.data.answers[qid]; },
+  /** Получить общую статистику по обоим пулам объединённо (нужно для главного экрана:
+   * "сколько всего отвечено"). Уникализация по qid: если вопрос отвечен в обоих,
+   * считаем один раз — по более свежей записи. */
+  getCombinedAnswer(qid) {
+    const a = this.data.answers[qid];
+    const b = this.data.sectionAnswers[qid];
+    if (a && b) return (a.ts || 0) >= (b.ts || 0) ? a : b;
+    return a || b;
+  },
   resetAll() {
-    this.data = { answers: {}, lastMode: null, overrides: this.data.overrides || {} };
+    this.data = {
+      answers: {}, sectionAnswers: {}, examUsed: [], examMistakes: [],
+      lastMode: null, overrides: this.data.overrides || {},
+    };
     this.save();
   },
-  resetSubset(ids) {
-    for (const id of ids) delete this.data.answers[id];
+  /** Локальный сброс подмножества (БЕЗ серверной синхронизации). По умолчанию чистит ОБА пула. */
+  resetSubset(ids, scope = 'all') {
+    if (scope === 'marathon' || scope === 'all') {
+      for (const id of ids) delete this.data.answers[id];
+    }
+    if (scope === 'section' || scope === 'all') {
+      for (const id of ids) delete this.data.sectionAnswers[id];
+    }
     this.save();
+  },
+  /**
+   * Сброс ответов по подмножеству id С СИНХРОНИЗАЦИЕЙ С СЕРВЕРОМ.
+   * scope: 'marathon' | 'section' | 'all' — какой пул чистить.
+   * Обычный resetSubset() локально удалит, но POST /progress мерджит — удалённые
+   * ответы вернутся с сервера. Поэтому здесь явный POST /progress/{uid}/delete-answers.
+   */
+  async resetSubsetWithCloud(ids, scope = 'all') {
+    if (!ids || ids.length === 0) return 0;
+    // 1) Локально удаляем сразу
+    if (scope === 'marathon' || scope === 'all') {
+      for (const id of ids) delete this.data.answers[id];
+    }
+    if (scope === 'section' || scope === 'all') {
+      for (const id of ids) delete this.data.sectionAnswers[id];
+    }
+    // НЕ зовём this.save() (он сделал бы POST /progress который мерджит) —
+    // вместо этого зовём localStorage напрямую + явный delete-answers на сервер.
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(this.data)); }
+    catch (e) { console.warn('Не удалось сохранить прогресс:', e); }
+    const auth = _apiAuth();
+    if (!auth) return ids.length;
+    try {
+      const r = await _apiFetch(`/progress/${auth.userId}/delete-answers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: ids.map(x => Number(x)), scope }),
+      });
+      if (r) {
+        const d = await r.json();
+        return d.removed || 0;
+      }
+    } catch(e) {
+      console.warn('resetSubsetWithCloud:', e);
+    }
+    return ids.length;
   },
   setLastMode(mode) { this.data.lastMode = mode; this.save(); },
   clearLastMode() { this.data.lastMode = null; this.save(); },
@@ -1102,15 +1189,15 @@ function getSections() {
   return Array.from(map.values()).sort((a, b) => a.number - b.number);
 }
 
-function topicStats(questions) {
+function topicStats(questions, scope = 'section') {
   let correct = 0, wrong = 0, untouched = 0;
   for (const q of questions) {
-    const a = Store.getAnswer(q.id);
+    const a = Store.getAnswer(q.id, scope);
     if (!a) untouched++;
     else if (a.status === 'correct') correct++;
     else wrong++;
   }
-  return { correct, wrong, untouched, total: questions.length };
+  return { correct, wrong, untouched, total: questions.length, answered: correct + wrong };
 }
 
 /* ---------- Проверка ответа ---------- */
@@ -1157,9 +1244,17 @@ const App = {
 
   renderHome() {
     this.topMeta.textContent = `Всего вопросов: ${QUESTIONS.length}`;
-    const totalAnswered = Object.keys(Store.data.answers).length;
-    const totalCorrect = Object.values(Store.data.answers).filter(a => a.status === 'correct').length;
-    const totalWrong = totalAnswered - totalCorrect;
+    // Общая статистика: считаем уникальные qid отвеченные в ЛЮБОМ из пулов.
+    // Это даёт пользователю представление о ширине охвата материала независимо
+    // от того, в каком режиме он отвечал.
+    let totalAnswered = 0, totalCorrect = 0, totalWrong = 0;
+    for (const q of QUESTIONS) {
+      const a = Store.getCombinedAnswer(q.id);
+      if (!a) continue;
+      totalAnswered++;
+      if (a.status === 'correct') totalCorrect++;
+      else totalWrong++;
+    }
     const pct = QUESTIONS.length ? Math.round(totalAnswered / QUESTIONS.length * 100) : 0;
 
     this.root.innerHTML = '';
@@ -1186,16 +1281,37 @@ const App = {
 
     // Продолжить марафон
     const _lmHasProgress = Store.data.lastMode && Store.data.lastMode.type === 'all' &&
-      Store.data.lastMode.order && Store.data.lastMode.order.some(id => Store.getAnswer(id));
+      Store.data.lastMode.order && Store.data.lastMode.order.some(id => Store.getAnswer(id, 'marathon'));
     if (_lmHasProgress) {
       const lm = Store.data.lastMode;
+      // Сколько ответов сейчас в пуле марафона (все тренажёрные вопросы)
+      const _marathonIds      = QUESTIONS.map(q => q.id);
+      const _marathonAnswered = _marathonIds.filter(id => Store.getAnswer(id, 'marathon')).length;
       this.root.appendChild(el('div', { class: 'question-card', style: 'margin-bottom:18px;' },
         el('div', { class: 'row between' },
           el('div', {},
             el('div', { style: 'font-weight:600;margin-bottom:4px;' }, '📌 Продолжить марафон'),
             el('div', { class: 'muted small' }, `Остановились на вопросе ${lm.currentIndex + 1} из ${lm.order.length}`)
           ),
-          el('button', { class: 'btn-primary', onclick: () => Mode.resumeAll() }, 'Продолжить')
+          el('div', { class: 'row', style: 'gap:6px;align-items:center;' },
+            el('button', {
+              class: 'btn-ghost small',
+              style: 'padding:6px 10px;font-size:13px;line-height:1;border-radius:8px;',
+              title: 'Сбросить прогресс марафона',
+              onclick: async () => {
+                if (!confirm(
+                  `Сбросить прогресс марафона?\n\n` +
+                  `Будет удалено ${_marathonAnswered} ответов и текущая позиция.\n` +
+                  `История экзаменов и правки вопросов сохранятся.`
+                )) return;
+                await Store.resetSubsetWithCloud(_marathonIds, 'marathon');
+                Store.clearLastMode();
+                haptic.success();
+                App.renderHome();
+              },
+            }, '🗑'),
+            el('button', { class: 'btn-primary', onclick: () => Mode.resumeAll() }, 'Продолжить'),
+          )
         )
       ));
     }
@@ -1326,9 +1442,28 @@ const App = {
       for (const t of sec.topics.values()) allQs.push(...t.questions);
       const secStats = topicStats(allQs);
 
+      // Заголовок раздела: название + статистика + кнопка сброса (если есть что сбрасывать)
+      const secHeaderRight = el('span', { class: 'row', style: 'gap:8px;align-items:center;' },
+        el('span', { class: 'muted small' }, `${secStats.correct}/${secStats.total} верно`)
+      );
+      if (secStats.answered > 0) {
+        secHeaderRight.appendChild(el('button', {
+          class: 'btn-ghost small',
+          style: 'padding:2px 8px;font-size:12px;line-height:1;border-radius:6px;',
+          title: 'Сбросить ответы раздела',
+          onclick: async (e) => {
+            e.stopPropagation();
+            if (!confirm(`Сбросить ${secStats.answered} ответов в разделе «${sec.title}»?\n\nВопросы снова станут «непройденными».`)) return;
+            const ids = allQs.map(q => q.id);
+            const removed = await Store.resetSubsetWithCloud(ids, 'section');
+            haptic.success();
+            App.renderTopics();  // перерисовка — статистика обновится
+          },
+        }, '🗑'));
+      }
       block.appendChild(el('div', { class: 'section-header row between' },
         el('span', {}, `Раздел ${sec.number}. ${sec.title}`),
-        el('span', { class: 'muted small' }, `${secStats.correct}/${secStats.total} верно`)
+        secHeaderRight,
       ));
 
       // кнопка "пройти весь раздел"
@@ -1342,12 +1477,31 @@ const App = {
 
       for (const t of sec.topics.values()) {
         const tStats = topicStats(t.questions);
+        // Правый блок темы: прогресс + кнопка сброса (если в теме есть ответы)
+        const topicRight = el('div', { class: 'topic-progress row', style: 'gap:6px;align-items:center;' },
+          renderProgressNum(tStats),
+        );
+        if (tStats.answered > 0) {
+          topicRight.appendChild(el('button', {
+            class: 'btn-ghost small',
+            style: 'padding:2px 6px;font-size:11px;line-height:1;border-radius:6px;margin-left:4px;',
+            title: 'Сбросить ответы темы',
+            onclick: async (e) => {
+              e.stopPropagation();
+              if (!confirm(`Сбросить ${tStats.answered} ответов в теме «${t.title}»?`)) return;
+              const ids = t.questions.map(q => q.id);
+              await Store.resetSubsetWithCloud(ids, 'section');
+              haptic.success();
+              App.renderTopics();
+            },
+          }, '🗑'));
+        }
         const row = el('div', { class: 'topic-row', onclick: () => Mode.startSubset(t.questions, t.title) },
           el('div', { class: 'topic-title' },
             el('div', { class: 'topic-name' }, t.number ? `${t.number}. ${t.title}` : t.title),
             el('div', { class: 'topic-meta' }, `${t.questions.length} вопросов`)
           ),
-          el('div', { class: 'topic-progress' }, renderProgressNum(tStats))
+          topicRight,
         );
         block.appendChild(row);
       }
@@ -1357,15 +1511,65 @@ const App = {
   },
 
   renderErrorsMode() {
-    const errorQs = QUESTIONS.filter(q => {
-      const a = Store.getAnswer(q.id);
-      return a && a.status === 'wrong';
-    });
-    if (errorQs.length === 0) {
-      alert('Ошибок пока нет 🎉');
+    // «Работа над ошибками» — это ПУЛ ОШИБОК ЭКЗАМЕНОВ.
+    // Источник: Store.data.examMistakes (пополняется после экзамена qid,
+    // где юзер ошибся или не ответил). Wrong-ответы из марафона/разделов
+    // СЮДА НЕ ПОПАДАЮТ — там работают свои механизмы повторения.
+    //
+    // При правильном ответе на вопрос отсюда → qid удаляется из examMistakes.
+    // При неправильном — qid остаётся, юзер увидит его снова.
+    // Хранилища марафона/разделов при этом НИКАК не затрагиваются.
+    const errorIds = (Store.data.examMistakes || [])
+      .filter(qid => getQuestion(qid));  // на всякий случай отсекаем не существующие qid
+
+    if (errorIds.length === 0) {
+      alert('Ошибок пока нет 🎉\n\nЗдесь будут вопросы, в которых ты ошибся в экзаменах.');
       return;
     }
-    Mode.startSubset(errorQs, `Работа над ошибками (${errorQs.length})`, true);
+
+    // Показываем экран-обёртку с кнопкой "Начать" + "🗑 Очистить пул"
+    this.topMeta.textContent = `Работа над ошибками: ${errorIds.length}`;
+    this.root.innerHTML = '';
+    this.root.appendChild(el('button', { class: 'btn-ghost', onclick: () => App.goHome() }, '← К меню'));
+
+    this.root.appendChild(el('h2', { style: 'margin:16px 0 8px;' },
+      `🔁 Работа над ошибками (${errorIds.length})`));
+    this.root.appendChild(el('div', { class: 'muted', style: 'margin-bottom:20px;' },
+      'Здесь — вопросы, в которых ты ошибся или не ответил в экзаменах. ' +
+      'Каждый правильный ответ убирает вопрос из этого пула.'));
+
+    this.root.appendChild(el('div', { class: 'row', style: 'gap:10px;flex-wrap:wrap;' },
+      el('button', {
+        class: 'btn-primary',
+        onclick: () => {
+          const errorQs = errorIds.map(qid => getQuestion(qid));
+          // shuffle, чтобы вопросы каждый раз шли в разном порядке
+          const shuffled = shuffle(errorQs.slice());
+          Session.start({
+            kind: 'practice',
+            title: `Работа над ошибками (${shuffled.length})`,
+            order: shuffled.map(q => q.id),
+            currentIndex: 0,
+            freshStart: true,    // без сохранения lastMode/палитры
+            scope: 'exam_mistakes',
+          });
+        },
+      }, '▶ Начать повторение'),
+      el('button', {
+        class: 'btn-ghost',
+        style: 'border-color: var(--wrong, #e74c3c); color: var(--wrong, #e74c3c);',
+        onclick: async () => {
+          if (!confirm(
+            `Очистить пул «Работа над ошибками»?\n\n` +
+            `Будет удалено ${errorIds.length} вопросов.\n` +
+            `Прогресс марафона и разделов сохранится.`
+          )) return;
+          await Store.resetSubsetWithCloud(errorIds, 'exam_mistakes');
+          haptic.success();
+          App.renderHome();
+        },
+      }, `🗑 Очистить (${errorIds.length})`),
+    ));
   },
 
   renderSearch() {
@@ -1820,13 +2024,33 @@ function clearExamTimer() {
   if (_examTimerInterval) { clearInterval(_examTimerInterval); _examTimerInterval = null; }
 }
 
+/**
+ * Выбрать N уникальных qid для нового экзамена.
+ * Логика: исключаем те, что уже были в прошлых экзаменах (Store.data.examUsed).
+ * Если оставшихся < N — сбрасываем examUsed и берём из полного пула заново.
+ * Возвращает массив длины min(N, QUESTIONS.length).
+ */
+function _pickExamIds(N) {
+  const all  = QUESTIONS.map(q => q.id);
+  const used = new Set(Store.data.examUsed || []);
+  let pool   = all.filter(id => !used.has(id));
+  if (pool.length < N) {
+    // Пул исчерпан — сбрасываем и берём из полного набора.
+    // Сохраняем сразу (в save() / cloud sync пойдёт пустой массив).
+    Store.data.examUsed = [];
+    Store.save();
+    pool = all.slice();
+  }
+  return shuffle(pool).slice(0, Math.min(N, pool.length));
+}
+
 const Mode = {
   // Марафон вопросов: все вопросы перемешиваются при каждом входе.
   // lastMode сохраняется ТОЛЬКО после первого ответа (в Session.persistLast).
   _firstUnanswered(order) {
-    // Первый вопрос без ответа; если все отвечены — с начала
+    // Используется только для марафона (Mode.startAll) → scope='marathon'
     for (let i = 0; i < order.length; i++) {
-      if (!Store.getAnswer(order[i])) return i;
+      if (!Store.getAnswer(order[i], 'marathon')) return i;
     }
     return 0;
   },
@@ -1841,6 +2065,7 @@ const Mode = {
       order,
       currentIndex: 0,
       saveAsLastMode: 'all',
+      scope: 'marathon',
     });
   },
 
@@ -1848,13 +2073,13 @@ const Mode = {
     const lm = Store.data.lastMode;
     if (!lm) return this.startAll();
     // Если нет ни одного ответа (после сброса) → startAll с перемешиванием
-    const hasAnyAnswer = lm.order && lm.order.some(id => Store.getAnswer(id));
+    const hasAnyAnswer = lm.order && lm.order.some(id => Store.getAnswer(id, 'marathon'));
     if (!hasAnyAnswer) return this.startAll();
     // Ищем первый неотвеченный начиная с сохранённой позиции
     const saved = lm.currentIndex || 0;
     let startIdx = saved;
     for (let i = saved; i < lm.order.length; i++) {
-      if (!Store.getAnswer(lm.order[i])) { startIdx = i; break; }
+      if (!Store.getAnswer(lm.order[i], 'marathon')) { startIdx = i; break; }
     }
     Session.start({
       kind: 'practice',
@@ -1862,6 +2087,7 @@ const Mode = {
       order: lm.order,
       currentIndex: startIdx,
       saveAsLastMode: 'all',
+      scope: 'marathon',
     });
   },
 
@@ -1897,7 +2123,11 @@ const Mode = {
     }
     // Новый экзамен: фиксируем startedAt и lastMode СРАЗУ — таймер сразу тикает.
     // remainingMs/resumedAt дают точку отсчёта, paused=false — таймер активен.
-    const ids = shuffle(QUESTIONS.map(q => q.id)).slice(0, Math.min(40, QUESTIONS.length));
+    //
+    // Уникальность между экзаменами: исключаем те qid, что уже попадали в
+    // прошлые экзамены (Store.data.examUsed). Когда оставшихся <40 — сбрасываем
+    // пул и начинаем заново (см. требование пользователя).
+    const ids = _pickExamIds(40);
     const startedAt = Date.now();
     Store.setLastMode({
       type:           'exam',
@@ -1917,25 +2147,42 @@ const Mode = {
   },
 
   // Произвольный сабсет — режим практики
-  startSubset(questions, title, freshStart = false) {
+  // freshStart=true → режим ошибок (без перемешивания/сохранения lastMode)
+  // orderScopes — массив scope для каждого id в order (нужен в режиме ошибок,
+  //    где вопросы могут быть из разных пулов; при ответе пишем в исходный).
+  //    Если orderScopes не передан — все вопросы пишутся в session.scope (default 'section').
+  startSubset(questions, title, freshStart = false, orderScopes = null) {
     if (freshStart) {
       // Работа над ошибками — без перемешивания, без сохранения
-      Session.start({ kind: 'practice', title, order: questions.map(q => q.id), currentIndex: 0, freshStart });
+      Session.start({
+        kind: 'practice', title,
+        order: questions.map(q => q.id), currentIndex: 0,
+        freshStart,
+        scope: 'section',  // дефолт для случая когда orderScopes не задан
+        orderScopes: orderScopes,
+      });
       return;
     }
     // Разделы/темы — перемешать. Восстановить если уже отвечали на этот раздел.
+    // ВАЖНО: проверяем Store.getAnswer(id, 'section') — пул разделов.
     const lm = Store.data.lastMode;
     const sameSubset = lm && lm.type === 'subset' && lm.title === title &&
-      lm.order && lm.order.some(id => Store.getAnswer(id));
+      lm.order && lm.order.some(id => Store.getAnswer(id, 'section'));
     if (sameSubset) {
       let startIdx = lm.currentIndex || 0;
       for (let i = lm.currentIndex || 0; i < lm.order.length; i++) {
-        if (!Store.getAnswer(lm.order[i])) { startIdx = i; break; }
+        if (!Store.getAnswer(lm.order[i], 'section')) { startIdx = i; break; }
       }
-      Session.start({ kind: 'practice', title, order: lm.order, currentIndex: startIdx, saveAsLastMode: 'subset', subsetTitle: title });
+      Session.start({
+        kind: 'practice', title, order: lm.order, currentIndex: startIdx,
+        saveAsLastMode: 'subset', subsetTitle: title, scope: 'section',
+      });
     } else {
       const order = shuffle(questions.map(q => q.id));
-      Session.start({ kind: 'practice', title, order, currentIndex: 0, saveAsLastMode: 'subset', subsetTitle: title });
+      Session.start({
+        kind: 'practice', title, order, currentIndex: 0,
+        saveAsLastMode: 'subset', subsetTitle: title, scope: 'section',
+      });
     }
   },
 };
@@ -2027,8 +2274,11 @@ const Session = {
       const ea = this.s.examAnswers || {};
       return Object.keys(ea).length > 0;
     }
-    for (const qid of this.s.order) {
-      if (Store.getAnswer(qid)) return true;
+    // practice — учитываем scope текущей сессии (или orderScopes для режима ошибок)
+    for (let i = 0; i < this.s.order.length; i++) {
+      const qid = this.s.order[i];
+      const sc  = (this.s.orderScopes && this.s.orderScopes[i]) || this.s.scope || 'marathon';
+      if (Store.getAnswer(qid, sc)) return true;
     }
     return false;
   },
@@ -2084,7 +2334,10 @@ const Session = {
         const stored = this.s.examAnswers && this.s.examAnswers[q.id];
         if (stored) this.ui = this.uiFromStored(q, stored);
       } else {
-        const stored = Store.getAnswer(q.id);
+        // practice: используем scope сессии (или orderScopes для режима ошибок)
+        const sc = (this.s.orderScopes && this.s.orderScopes[this.s.currentIndex])
+                || this.s.scope || 'marathon';
+        const stored = Store.getAnswer(q.id, sc);
         if (stored) this.ui = this.uiFromStored(q, stored);
       }
     }
@@ -2111,8 +2364,10 @@ const Session = {
     // Палитра вопросов (только для practice с >1 вопросом и не слишком длинной сессии)
     if (this.s.kind === 'practice' && this.s.order.length > 1 && this.s.order.length <= 500) {
       const grid = el('div', { class: 'question-grid' });
+      const _sessionScope = this.s.scope || 'marathon';
       this.s.order.forEach((qid, idx) => {
-        const a = Store.getAnswer(qid);
+        const sc = (this.s.orderScopes && this.s.orderScopes[idx]) || _sessionScope;
+        const a  = Store.getAnswer(qid, sc);
         const classes = ['q-chip'];
         if (idx === this.s.currentIndex) classes.push('current');
         if (a && a.status === 'correct') classes.push('correct');
@@ -2418,12 +2673,24 @@ const Session = {
     this.ui.status = status;
     if (this.s.kind === 'exam') {
       // Экзамен: ответы изолированы в s.examAnswers (синхронизируются с lm.attemptAnswers).
-      // В глобальный Store.data.answers попадут только после finishExam().
+      // НЕ копируются в общий Store.data.answers ни при ответе, ни при finishExam.
       if (!this.s.examAnswers) this.s.examAnswers = {};
       this.s.examAnswers[q.id] = { status, given, ts: Date.now() };
       this.persistLast();  // запишет lm.attemptAnswers и обновит сервер
+    } else if (this.s.noRecord) {
+      // Разбор ошибок экзамена сразу после попытки — UI показываем, в пулы не пишем
     } else {
-      Store.recordAnswer(q.id, status, given);
+      // Practice: scope = session.scope (marathon / section / exam_mistakes).
+      const scope = this.s.scope || 'marathon';
+      if (scope === 'exam_mistakes') {
+        // Работа над ошибками — это режим ОТРАБОТКИ.
+        // Пул examMistakes тут НЕ изменяется: вопросы остаются для повторения,
+        // независимо от того, ответил юзер правильно или нет. Юзер очищает
+        // пул вручную через кнопку «Очистить».
+        // В marathon/section тоже НЕ пишем — пулы независимы.
+      } else {
+        Store.recordAnswer(q.id, status, given, scope);
+      }
     }
     this.renderCurrent();
   },
@@ -2544,11 +2811,22 @@ const Session = {
       else sectionsStats[sNum].wrong++;
     }
 
-    // Переносим ответы экзамена в общий Store.data.answers — чтобы они учитывались
-    // в «Работе над ошибками» и в палитре практики. Делаем это только при ЗАВЕРШЕНИИ.
-    for (const [qid, ans] of Object.entries(examAnswers)) {
-      Store.recordAnswer(parseInt(qid, 10), ans.status, ans.given);
+    // Пополняем:
+    //   1) examUsed — qid'ами этой попытки (для уникальности следующих экзаменов)
+    //   2) examMistakes — qid где юзер ошибся ИЛИ не ответил.
+    //      Правильные ответы examMistakes НЕ удаляют — пул чистится только вручную.
+    const usedSet    = new Set(Store.data.examUsed || []);
+    const mistakeSet = new Set(Store.data.examMistakes || []);
+    for (const qid of this.s.order) {
+      usedSet.add(qid);
+      const stored = examAnswers[qid];
+      if (!stored || stored.status !== 'correct') {
+        mistakeSet.add(qid);
+      }
     }
+    Store.data.examUsed     = Array.from(usedSet);
+    Store.data.examMistakes = Array.from(mistakeSet);
+    Store.save();
 
     // Пишем попытку в облако (если есть авторизация). Дубль защищён started_at в API.
     try {
@@ -2596,7 +2874,18 @@ const Session = {
       el('button', { onclick: () => {
         const errorQs = results.filter(r => r.status === 'wrong').map(r => r.q);
         if (errorQs.length === 0) { alert('Ошибок нет!'); return; }
-        Mode.startSubset(errorQs, `Ошибки экзамена (${errorQs.length})`);
+        // freshStart=true → без сохранения lastMode/палитры.
+        // noRecord=true → ответы при разборе не пишутся ни в один пул
+        // (это разовый разбор для текущей попытки экзамена, не должен
+        // влиять на marathon/section статистику).
+        Session.start({
+          kind: 'practice',
+          title: `Ошибки экзамена (${errorQs.length})`,
+          order: errorQs.map(q => q.id),
+          currentIndex: 0,
+          freshStart: true,
+          noRecord: true,
+        });
       }}, '🔁 Разобрать ошибки'),
       el('div', { class: 'spacer' }),
       el('button', { class: 'btn-ghost', onclick: () => App.goHome() }, '← В меню')
@@ -2663,8 +2952,11 @@ const Session = {
     // Подсчёт по сессии
     const total = this.s.order.length;
     let correctCount = 0, wrongCount = 0, skipped = 0;
-    for (const qid of this.s.order) {
-      const a = Store.getAnswer(qid);
+    const _sessionScope = this.s.scope || 'marathon';
+    for (let i = 0; i < this.s.order.length; i++) {
+      const qid = this.s.order[i];
+      const sc  = (this.s.orderScopes && this.s.orderScopes[i]) || _sessionScope;
+      const a   = Store.getAnswer(qid, sc);
       if (!a) skipped++;
       else if (a.status === 'correct') correctCount++;
       else wrongCount++;
@@ -3080,13 +3372,18 @@ Store.save = function() {
   localStorage.setItem('gosexam_last_save_ts', String(Date.now()));
   const auth = _apiAuth();
   if (!auth) return;
-  // Сохраняем на сервер — любой ответ игнорируем (fire-and-forget)
+  // Сохраняем на сервер — любой ответ игнорируем (fire-and-forget).
+  // Шлём ВСЕ поля: марафонский пул, разделовый пул, exam_used (массив, replace),
+  // last_mode. Сервер мерджит answers/section_answers по ts, exam_used — replace.
   _apiFetch(`/progress/${auth.userId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      answers:   Store.data.answers,
-      last_mode: Store.data.lastMode || null,
+      answers:         Store.data.answers,
+      section_answers: Store.data.sectionAnswers || {},
+      exam_used:       Store.data.examUsed || [],
+      exam_mistakes:   Store.data.examMistakes || [],
+      last_mode:       Store.data.lastMode || null,
     }),
   });
 };
@@ -3108,19 +3405,45 @@ Store.loadFromCloud = async function(cb) {
     const isNewReset   = resetAt > 0 && resetAt !== lastResetAt;
 
     if (isNewReset) {
-      Store.data = { answers: {}, lastMode: null, overrides: Store.data.overrides || {} };
+      Store.data = {
+        answers: {}, sectionAnswers: {}, examUsed: [], examMistakes: [],
+        lastMode: null, overrides: Store.data.overrides || {},
+      };
       _saveLocal();
       localStorage.setItem('gosexam_last_reset_at', String(resetAt));
       localStorage.removeItem('gosexam_last_save_ts');
       console.log('[API] прогресс сброшен, reset_at=' + resetAt);
     } else {
-      // Мерж: обе стороны, побеждает более новый ts
+      // Мерж marathon: обе стороны, побеждает более новый ts
       const merged = { ...(Store.data.answers || {}) };
       for (const [id, v] of Object.entries(data.answers || {})) {
         const loc = merged[id];
         if (!loc || (v.ts||0) >= (loc.ts||0)) merged[id] = v;
       }
       Store.data.answers = merged;
+
+      // Мерж section: аналогично
+      const mergedSec = { ...(Store.data.sectionAnswers || {}) };
+      for (const [id, v] of Object.entries(data.section_answers || {})) {
+        const loc = mergedSec[id];
+        if (!loc || (v.ts||0) >= (loc.ts||0)) mergedSec[id] = v;
+      }
+      Store.data.sectionAnswers = mergedSec;
+
+      // exam_used: REPLACE из облака (сервер — источник истины).
+      // Используем union чтобы в worst case не потерять ничего при гонке двух устройств.
+      const usedSet = new Set([...(Store.data.examUsed || []), ...(data.exam_used || [])]);
+      Store.data.examUsed = Array.from(usedSet);
+
+      // exam_mistakes: используем СЕРВЕРНУЮ версию как авторитативную.
+      // Это критично для исправления: если юзер на устройстве A исправил qid
+      // (qid удалён из локального examMistakes, ушёл на сервер) — устройство B
+      // не должно его реанимировать через union. Поэтому REPLACE.
+      // На сервере merge при POST не применяется к exam_mistakes (REPLACE).
+      Store.data.examMistakes = Array.isArray(data.exam_mistakes)
+        ? data.exam_mistakes.slice()
+        : (Store.data.examMistakes || []);
+
       // last_mode: облако — источник истины.
       // Если сервер вернул last_mode=null (например, после завершения экзамена на другом
       // устройстве) — мы тоже зануляем локальный. Иначе берём по более новому ts.
@@ -3130,7 +3453,6 @@ Store.loadFromCloud = async function(cb) {
         Store.data.lastMode = null;
       } else if (apiLm.type === 'exam' && isFinalizedExam(apiLm.startedAt)) {
         // Этот экзамен уже завершён локально — не открываем его повторно.
-        // Активно зачищаем lastMode и на сервере тоже (через Store.save в конце).
         console.log('[API] игнорируем устаревший lastMode завершённого экзамена',
                     apiLm.startedAt);
         Store.data.lastMode = null;
@@ -3140,8 +3462,12 @@ Store.loadFromCloud = async function(cb) {
         if (apiTs >= locTs) Store.data.lastMode = apiLm;
       }
       _saveLocal();
-      console.log('[API] синхронизировано, ответов:', Object.keys(Store.data.answers).length,
-                  'lastMode:', Store.data.lastMode?.type || 'null');
+      console.log('[API] синхронизировано:',
+                  'marathon=' + Object.keys(Store.data.answers).length,
+                  'section='  + Object.keys(Store.data.sectionAnswers).length,
+                  'exam_used=' + Store.data.examUsed.length,
+                  'exam_mistakes=' + Store.data.examMistakes.length,
+                  'lastMode='  + (Store.data.lastMode?.type || 'null'));
     }
   } catch(e) {
     console.warn('[API] loadFromCloud ошибка:', e);
@@ -3151,13 +3477,16 @@ Store.loadFromCloud = async function(cb) {
 
 // Сброс прогресса — чистим и API тоже
 Store.resetWithApi = function() {
-  Store.data = { answers: {}, lastMode: null, overrides: Store.data.overrides || {} };
+  Store.data = {
+    answers: {}, sectionAnswers: {}, examUsed: [], examMistakes: [],
+    lastMode: null, overrides: Store.data.overrides || {},
+  };
   _saveLocal();
   localStorage.removeItem('gosexam_last_save_ts');
   const auth = _apiAuth();
   if (!auth) return;
   _apiFetch(`/progress/${auth.userId}`, { method: 'DELETE' });
-  console.log('[API] прогресс сброшен');
+  console.log('[API] прогресс сброшен (оба пула + examUsed + examMistakes)');
 };
 
 // Проверка: завершался ли уже экзамен с таким started_at локально.
