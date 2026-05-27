@@ -771,6 +771,22 @@ html, body { margin: 0; overscroll-behavior-y: none; }
   animation: tgspin 0.8s linear infinite;
 }
 @keyframes tgspin { to { transform: rotate(360deg); } }
+
+/* ── Баннер тех.работ ── */
+#maint-banner {
+  display: none;
+  position: sticky;
+  top: 0;
+  z-index: 9999;
+  padding: 10px 14px;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: center;
+  border-bottom: 1px solid rgba(0,0,0,0.1);
+}
+#maint-banner.show { display: block; }
+#maint-banner.banner { background: #fff3cd; color: #664d03; }
+#maint-banner.block-admin { background: #f8d7da; color: #842029; }
 </style>
 </head>
 <body>
@@ -779,6 +795,8 @@ html, body { margin: 0; overscroll-behavior-y: none; }
   <div class="tg-spinner"></div>
   <div id="tg-loader-text">Загружаем вопросы…</div>
 </div>
+
+<div id="maint-banner"></div>
 
 <header class="top" id="main-header" style="visibility:hidden;">
   <div class="top-inner">
@@ -3201,6 +3219,78 @@ App.goHome = function() { _gh(); setBackBtn(false); };
 });
 
 /* Старт */
+async function fetchMaintenance() {
+  const user     = tg?.initDataUnsafe?.user;
+  const initData = tg?.initData || '';
+  if (!user?.id || !initData) return { status: 'off', is_admin: false, message: '' };
+  if (!API_URL || API_URL.includes('ВАШ_ДОМЕН') || !API_URL.startsWith('https')) {
+    return { status: 'off', is_admin: false, message: '' };
+  }
+  try {
+    const r = await fetch(`${API_URL}/maintenance`, {
+      headers: { 'Authorization': 'TgInitData ' + initData },
+      cache: 'no-store',
+    });
+    if (!r.ok) return { status: 'off', is_admin: false, message: '' };
+    return await r.json();
+  } catch(e) {
+    return { status: 'off', is_admin: false, message: '' };
+  }
+}
+
+function renderMaintBanner(state) {
+  const el = document.getElementById('maint-banner');
+  if (!el) return;
+  const s = state?.status || 'off';
+  const msg = state?.message || '';
+  if (s === 'banner') {
+    el.className = 'show banner';
+    el.textContent = msg || '⚠️ Идут технические работы.';
+  } else if (s === 'block' && state?.is_admin) {
+    el.className = 'show block-admin';
+    el.textContent = '🛑 Тех.работы активны. Обычные пользователи заблокированы. ' + msg;
+  } else {
+    el.className = '';
+    el.textContent = '';
+  }
+}
+
+function showMaintBlock(loader, ltext, message) {
+  loader.style.background = 'var(--bg, #1a1a2e)';
+  loader.style.opacity    = '1';
+  loader.style.display    = 'flex';
+  const safeMsg = (message || 'Идут технические работы. Зайдите чуть позже.')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  ltext.innerHTML =
+    '<div style="text-align:center;padding:32px 24px;">' +
+    '<div style="font-size:48px;margin-bottom:16px;">🛠️</div>' +
+    '<div style="font-size:18px;font-weight:700;margin-bottom:10px;">Тех. работы</div>' +
+    '<div style="font-size:14px;color:#888;line-height:1.5;">' + safeMsg + '</div>' +
+    '<div style="margin-top:24px;">' +
+    '<button onclick="location.reload()" style="padding:10px 20px;border-radius:8px;background:#6ba4ff;color:#fff;border:none;font-size:14px;cursor:pointer;">🔄 Обновить</button>' +
+    '</div></div>';
+}
+
+// Периодический опрос состояния: каждые 60 сек.
+// Если режим сменился на block (и юзер не админ) — перезагружаем страницу,
+// чтобы показать заглушку. Иначе просто обновляем баннер.
+let _maintLastStatus = 'off';
+function startMaintPolling() {
+  setInterval(async () => {
+    const st = await fetchMaintenance();
+    const s  = st.status || 'off';
+    if (s === 'block' && !st.is_admin) {
+      // обычный юзер во время работы → разлогиниваем UI через перезагрузку
+      location.reload();
+      return;
+    }
+    if (s !== _maintLastStatus) {
+      _maintLastStatus = s;
+    }
+    renderMaintBanner(st);
+  }, 60000);
+}
+
 async function checkAccess() {
   const user     = tg?.initDataUnsafe?.user;
   const initData = tg?.initData || '';
@@ -3244,6 +3334,13 @@ async function boot() {
       showNoAccess(loader, ltext);
       return;
     }
+    // Проверка режима тех.работ. Если block и юзер не админ — заглушка.
+    const maint = await fetchMaintenance();
+    _maintLastStatus = maint.status || 'off';
+    if (maint.status === 'block' && !maint.is_admin) {
+      showMaintBlock(loader, ltext, maint.message);
+      return;
+    }
     ltext.textContent = 'Загружаем вопросы…';
     await loadQuestions();
     ltext.textContent = 'Синхронизируем прогресс…';
@@ -3256,6 +3353,9 @@ async function boot() {
       loader.style.display = 'none';
       header.style.visibility = '';
       appEl.style.visibility = '';
+      // Баннер (banner или block-для-админа) — рисуем после показа UI
+      renderMaintBanner(maint);
+      startMaintPolling();
       App.renderHome();
     }, 350);
   } catch(e) {
