@@ -459,6 +459,8 @@
     font-size: 13px;
     line-height: 1.6;
     border-radius: 0 4px 4px 0;
+    white-space: pre-wrap;     /* сохраняем переносы строк из solution */
+    word-wrap: break-word;
   }
   .solution-block strong { color: var(--warn); }
 
@@ -2501,7 +2503,9 @@ const Session = {
         this.ui.status === 'wrong' ? el('div', {}, 'Правильный ответ подсвечен зелёным.') : null
       );
       card.appendChild(fb);
-      if (q.solution) {
+      // Решение (для расчётных задач) — показываем ТОЛЬКО при неправильном ответе.
+      // Это даёт юзеру шанс самому разобраться, и помогает понять ошибку.
+      if (q.solution && this.ui.status === 'wrong') {
         card.appendChild(el('div', { class: 'solution-block' },
           el('strong', {}, '💡 Решение: '),
           q.solution
