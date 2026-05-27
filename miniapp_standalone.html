@@ -2274,11 +2274,16 @@ const Session = {
       const ea = this.s.examAnswers || {};
       return Object.keys(ea).length > 0;
     }
-    // practice — учитываем scope текущей сессии (или orderScopes для режима ошибок)
+    // practice
+    const _scope = this.s.scope || 'marathon';
+    const _isSessionScoped = this.s.noRecord || _scope === 'exam_mistakes';
+    if (_isSessionScoped) {
+      const sa = this.s.sessionAnswers || {};
+      return Object.keys(sa).length > 0;
+    }
     for (let i = 0; i < this.s.order.length; i++) {
       const qid = this.s.order[i];
-      const sc  = (this.s.orderScopes && this.s.orderScopes[i]) || this.s.scope || 'marathon';
-      if (Store.getAnswer(qid, sc)) return true;
+      if (Store.getAnswer(qid, _scope)) return true;
     }
     return false;
   },
@@ -2329,17 +2334,26 @@ const Session = {
     //     пометили вопросы как отвеченные.
     //   • Practice (марафон/разделы): восстанавливаем из Store.getAnswer,
     //     как и раньше.
-    if (!this.ui && !this.s.freshStart) {
+    // Восстановление UI происходит даже при freshStart — потому что в режимах
+    // "Работа над ошибками" и "Разбор ошибок экзамена" мы храним ответы СЕССИИ
+    // локально (this.s.sessionAnswers). Это даёт правильную подсветку при
+    // перелистывании назад / в палитре, без записи в персистентные пулы.
+    if (!this.ui) {
+      let stored = null;
       if (this.s.kind === 'exam') {
-        const stored = this.s.examAnswers && this.s.examAnswers[q.id];
-        if (stored) this.ui = this.uiFromStored(q, stored);
+        stored = this.s.examAnswers && this.s.examAnswers[q.id];
       } else {
-        // practice: используем scope сессии (или orderScopes для режима ошибок)
-        const sc = (this.s.orderScopes && this.s.orderScopes[this.s.currentIndex])
-                || this.s.scope || 'marathon';
-        const stored = Store.getAnswer(q.id, sc);
-        if (stored) this.ui = this.uiFromStored(q, stored);
+        const scope = this.s.scope || 'marathon';
+        const isSessionScoped = this.s.noRecord || scope === 'exam_mistakes';
+        if (isSessionScoped) {
+          // Локальные ответы текущей сессии
+          stored = this.s.sessionAnswers && this.s.sessionAnswers[q.id];
+        } else if (!this.s.freshStart) {
+          // Обычные practice-режимы (марафон/раздел) — из персистентного Store
+          stored = Store.getAnswer(q.id, scope);
+        }
       }
+      if (stored) this.ui = this.uiFromStored(q, stored);
     }
 
     App.root.innerHTML = '';
@@ -2365,9 +2379,13 @@ const Session = {
     if (this.s.kind === 'practice' && this.s.order.length > 1 && this.s.order.length <= 500) {
       const grid = el('div', { class: 'question-grid' });
       const _sessionScope = this.s.scope || 'marathon';
+      const _isSessionScoped = this.s.noRecord || _sessionScope === 'exam_mistakes';
       this.s.order.forEach((qid, idx) => {
-        const sc = (this.s.orderScopes && this.s.orderScopes[idx]) || _sessionScope;
-        const a  = Store.getAnswer(qid, sc);
+        // Для exam_mistakes / noRecord ответы хранятся локально в session,
+        // в Store их нет. Для марафона/раздела — наоборот, читаем из Store.
+        const a = _isSessionScoped
+          ? (this.s.sessionAnswers && this.s.sessionAnswers[qid])
+          : Store.getAnswer(qid, _sessionScope);
         const classes = ['q-chip'];
         if (idx === this.s.currentIndex) classes.push('current');
         if (a && a.status === 'correct') classes.push('correct');
@@ -2678,16 +2696,22 @@ const Session = {
       this.s.examAnswers[q.id] = { status, given, ts: Date.now() };
       this.persistLast();  // запишет lm.attemptAnswers и обновит сервер
     } else if (this.s.noRecord) {
-      // Разбор ошибок экзамена сразу после попытки — UI показываем, в пулы не пишем
+      // Разбор ошибок экзамена сразу после попытки — UI показываем, в пулы не пишем.
+      // Но локально в сессии сохраняем — чтобы UI при перелистывании / финальный
+      // экран видели результаты этой сессии.
+      if (!this.s.sessionAnswers) this.s.sessionAnswers = {};
+      this.s.sessionAnswers[q.id] = { status, given, ts: Date.now() };
     } else {
       // Practice: scope = session.scope (marathon / section / exam_mistakes).
       const scope = this.s.scope || 'marathon';
       if (scope === 'exam_mistakes') {
-        // Работа над ошибками — это режим ОТРАБОТКИ.
-        // Пул examMistakes тут НЕ изменяется: вопросы остаются для повторения,
-        // независимо от того, ответил юзер правильно или нет. Юзер очищает
-        // пул вручную через кнопку «Очистить».
-        // В marathon/section тоже НЕ пишем — пулы независимы.
+        // Работа над ошибками — режим ОТРАБОТКИ.
+        // Глобальный пул examMistakes НЕ изменяется (вопросы остаются для повторения).
+        // marathon/section тоже НЕ трогаем.
+        // НО локально в сессии сохраняем — для подсветки в UI, палитры и финального
+        // экрана этой сессии. При следующем заходе в "Работу над ошибками" — снова чистый лист.
+        if (!this.s.sessionAnswers) this.s.sessionAnswers = {};
+        this.s.sessionAnswers[q.id] = { status, given, ts: Date.now() };
       } else {
         Store.recordAnswer(q.id, status, given, scope);
       }
@@ -2953,10 +2977,13 @@ const Session = {
     const total = this.s.order.length;
     let correctCount = 0, wrongCount = 0, skipped = 0;
     const _sessionScope = this.s.scope || 'marathon';
+    const _isSessionScoped = this.s.noRecord || _sessionScope === 'exam_mistakes';
     for (let i = 0; i < this.s.order.length; i++) {
       const qid = this.s.order[i];
-      const sc  = (this.s.orderScopes && this.s.orderScopes[i]) || _sessionScope;
-      const a   = Store.getAnswer(qid, sc);
+      // exam_mistakes / noRecord — ответы только в session.sessionAnswers
+      const a = _isSessionScoped
+        ? (this.s.sessionAnswers && this.s.sessionAnswers[qid])
+        : Store.getAnswer(qid, _sessionScope);
       if (!a) skipped++;
       else if (a.status === 'correct') correctCount++;
       else wrongCount++;
