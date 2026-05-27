@@ -1535,8 +1535,8 @@ const App = {
     this.root.appendChild(el('h2', { style: 'margin:16px 0 8px;' },
       `🔁 Работа над ошибками (${errorIds.length})`));
     this.root.appendChild(el('div', { class: 'muted', style: 'margin-bottom:20px;' },
-      'Здесь — вопросы, в которых ты ошибся или не ответил в экзаменах. ' +
-      'Каждый правильный ответ убирает вопрос из этого раздела.'));
+      'Вопросы, в которых ты ошибся в марафоне, разделах или экзамене. ' +
+      'Правильный ответ убирает вопрос из пула, неправильный — оставляет.'));
 
     this.root.appendChild(el('div', { class: 'row', style: 'gap:10px;flex-wrap:wrap;' },
       el('button', {
@@ -2705,13 +2705,20 @@ const Session = {
       // Practice: scope = session.scope (marathon / section / exam_mistakes).
       const scope = this.s.scope || 'marathon';
       if (scope === 'exam_mistakes') {
-        // Работа над ошибками — режим ОТРАБОТКИ.
-        // Глобальный пул examMistakes НЕ изменяется (вопросы остаются для повторения).
-        // marathon/section тоже НЕ трогаем.
-        // НО локально в сессии сохраняем — для подсветки в UI, палитры и финального
-        // экрана этой сессии. При следующем заходе в "Работу над ошибками" — снова чистый лист.
+        // Работа над ошибками.
+        // 1) Локально для UI этой сессии — сохраняем (подсветка, палитра, итог "X/N").
         if (!this.s.sessionAnswers) this.s.sessionAnswers = {};
         this.s.sessionAnswers[q.id] = { status, given, ts: Date.now() };
+        // 2) Глобальный пул examMistakes:
+        //    - correct → qid УДАЛЯЕТСЯ (юзер закрыл этот вопрос)
+        //    - wrong   → qid остаётся (надо отработать ещё)
+        // marathon/section пулы НЕ трогаем — они независимы.
+        if (status === 'correct') {
+          const setM = new Set(Store.data.examMistakes || []);
+          setM.delete(q.id);
+          Store.data.examMistakes = Array.from(setM);
+          Store.save();
+        }
       } else {
         Store.recordAnswer(q.id, status, given, scope);
       }
