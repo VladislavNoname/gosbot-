@@ -1245,17 +1245,20 @@ const App = {
 
   renderHome() {
     this.topMeta.textContent = `Всего вопросов: ${QUESTIONS.length}`;
-    // Общая статистика: считаем уникальные qid отвеченные в ЛЮБОМ из пулов.
-    // Это даёт пользователю представление о ширине охвата материала независимо
-    // от того, в каком режиме он отвечал.
-    let totalAnswered = 0, totalCorrect = 0, totalWrong = 0;
+    // Статистика главной — синхронизирована с пулом «Работы над ошибками»:
+    //   • "Неверных" = размер examMistakes (то же число, что в "Работе над ошибками")
+    //   • "Верных"   = уникальные qid с status='correct' в любом пуле (marathon/section)
+    //   • "Изучено%" = (верных + неверных) / всего
+    // Исправление вопроса в «Работе над ошибками» уменьшит "Неверных" автоматически.
+    const wrongIds = new Set((Store.data.examMistakes || []).map(Number));
+    let totalCorrect = 0;
     for (const q of QUESTIONS) {
+      if (wrongIds.has(Number(q.id))) continue;  // не двойной счёт
       const a = Store.getCombinedAnswer(q.id);
-      if (!a) continue;
-      totalAnswered++;
-      if (a.status === 'correct') totalCorrect++;
-      else totalWrong++;
+      if (a && a.status === 'correct') totalCorrect++;
     }
+    const totalWrong    = wrongIds.size;
+    const totalAnswered = totalCorrect + totalWrong;
     const pct = QUESTIONS.length ? Math.round(totalAnswered / QUESTIONS.length * 100) : 0;
 
     this.root.innerHTML = '';
