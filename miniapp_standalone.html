@@ -2030,24 +2030,54 @@ function clearExamTimer() {
   if (_examTimerInterval) { clearInterval(_examTimerInterval); _examTimerInterval = null; }
 }
 
+// План экзамена: разделы в фиксированном порядке + сколько случайных вопросов
+// берём из каждого. Вопросы ВНУТРИ раздела случайны, но позиции в экзамене
+// закреплены за разделами:
+//   1-7   — раздел 1 (АРХИТЕКТУРА ПРЕДПРИЯТИЯ)
+//   8-27  — раздел 2 (БУСЛАЕВА)
+//   28-34 — раздел 3 (ЭЛЕКТРОННЫЙ БИЗНЕС)
+//   35-40 — раздел 6 (ИНВЕСТИЦИИ И ИНВЕСТИЦИОННЫЙ АНАЛИЗ)
+// Сумма count = 40.
+const EXAM_SECTION_PLAN = [
+  { section: 1, count: 7  },
+  { section: 2, count: 20 },
+  { section: 3, count: 7  },
+  { section: 6, count: 6  },
+];
+
 /**
- * Выбрать N уникальных qid для нового экзамена.
- * Логика: исключаем те, что уже были в прошлых экзаменах (Store.data.examUsed).
- * Если оставшихся < N — сбрасываем examUsed и берём из полного пула заново.
- * Возвращает массив длины min(N, QUESTIONS.length).
+ * Выбрать qid для нового экзамена по разделам (см. EXAM_SECTION_PLAN).
+ * Внутри каждого раздела вопросы случайны; разделы идут строго в порядке плана.
+ * Уникальность между экзаменами: исключаем qid, уже попадавшие в прошлые
+ * экзамены (Store.data.examUsed). Если в каком-то разделе оставшихся вопросов
+ * меньше нужного — сбрасываем пул ИМЕННО этого раздела (убираем его qid из
+ * examUsed) и берём из полного набора раздела заново.
+ * Возвращает массив qid (обычно длины 40, меньше — только если вопросов в
+ * каком-то разделе физически не хватает).
  */
-function _pickExamIds(N) {
-  const all  = QUESTIONS.map(q => q.id);
+function _pickExamIds() {
   const used = new Set(Store.data.examUsed || []);
-  let pool   = all.filter(id => !used.has(id));
-  if (pool.length < N) {
-    // Пул исчерпан — сбрасываем и берём из полного набора.
-    // Сохраняем сразу (в save() / cloud sync пойдёт пустой массив).
-    Store.data.examUsed = [];
-    Store.save();
-    pool = all.slice();
+  let usedChanged = false;
+  const result = [];
+
+  for (const { section, count } of EXAM_SECTION_PLAN) {
+    const sectionIds = QUESTIONS.filter(q => q.section === section).map(q => q.id);
+    let avail = sectionIds.filter(id => !used.has(id));
+    if (avail.length < count) {
+      // Пул раздела исчерпан — освобождаем его qid и берём заново из полного набора.
+      for (const id of sectionIds) used.delete(id);
+      usedChanged = true;
+      avail = sectionIds.slice();
+    }
+    result.push(...shuffle(avail).slice(0, Math.min(count, avail.length)));
   }
-  return shuffle(pool).slice(0, Math.min(N, pool.length));
+
+  if (usedChanged) {
+    // Сохраняем обновлённый examUsed (в cloud sync пойдёт актуальный массив).
+    Store.data.examUsed = Array.from(used);
+    Store.save();
+  }
+  return result;
 }
 
 const Mode = {
@@ -2130,10 +2160,11 @@ const Mode = {
     // Новый экзамен: фиксируем startedAt и lastMode СРАЗУ — таймер сразу тикает.
     // remainingMs/resumedAt дают точку отсчёта, paused=false — таймер активен.
     //
-    // Уникальность между экзаменами: исключаем те qid, что уже попадали в
-    // прошлые экзамены (Store.data.examUsed). Когда оставшихся <40 — сбрасываем
-    // пул и начинаем заново (см. требование пользователя).
-    const ids = _pickExamIds(40);
+    // Вопросы набираются по разделам (см. EXAM_SECTION_PLAN / _pickExamIds):
+    // 7 из «Архитектуры», 20 из «Буслаевой», 7 из «Электронного бизнеса»,
+    // 6 из «Инвестиций» — внутри раздела случайно, разделы идут по порядку.
+    // Уникальность между экзаменами учитывается отдельно по каждому разделу.
+    const ids = _pickExamIds();
     const startedAt = Date.now();
     Store.setLastMode({
       type:           'exam',
