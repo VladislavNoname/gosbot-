@@ -2440,12 +2440,20 @@ const Session = {
       // Сетка пересоздаётся при каждой перерисовке и скроллится в начало, из-за
       // чего терялся текущий вопрос (например, после ответа на №200 показывался
       // снова №1). Прокручиваем палитру к текущему вопросу, чтобы он был виден.
+      // Считаем через getBoundingClientRect (надёжно, не зависит от offsetParent
+      // и позиционирования) и двойной rAF — чтобы раскладка грида (aspect-ratio)
+      // уже была посчитана к моменту измерения.
       if (currentChip) {
-        // requestAnimationFrame — чтобы размеры элементов уже посчитались.
-        requestAnimationFrame(() => {
-          const top = currentChip.offsetTop - grid.clientHeight / 2 + currentChip.clientHeight / 2;
-          grid.scrollTop = Math.max(0, top);
-        });
+        const centerCurrent = () => {
+          const gridRect = grid.getBoundingClientRect();
+          const chipRect = currentChip.getBoundingClientRect();
+          // Текущее смещение чипа относительно верха содержимого грида:
+          const chipOffset = (chipRect.top - gridRect.top) + grid.scrollTop;
+          const target = chipOffset - grid.clientHeight / 2 + chipRect.height / 2;
+          const maxScroll = grid.scrollHeight - grid.clientHeight;
+          grid.scrollTop = Math.max(0, Math.min(target, maxScroll));
+        };
+        requestAnimationFrame(() => requestAnimationFrame(centerCurrent));
       }
     }
 
