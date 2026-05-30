@@ -830,7 +830,7 @@ let QUESTIONS_ALL = [];  // Полный набор (включая search_only 
 
 // Версия сборки — видно в консоли при запуске, чтобы понять, какая версия
 // страницы реально загрузилась (а не из кэша Telegram WebView).
-const BUILD_VERSION = 'palette-scroll-3-noflicker (2026-05)';
+const BUILD_VERSION = 'palette-scroll-4-keeppage (2026-05)';
 console.log('[gosexam] BUILD_VERSION =', BUILD_VERSION);
 
 const QUESTIONS_URL = 'https://raw.githubusercontent.com/VladislavNoname/gosbot-/main/questions_miniapp.json';
@@ -2241,6 +2241,7 @@ const Session = {
   start(session) {
     this.s = session;
     this.ui = null;
+    this._renderedIndex = undefined;   // новая сессия → первый кадр прокручиваем наверх
     // Запускаем таймер сразу при старте/восстановлении экзамена
     if (session.kind === 'exam' && session.startedAt) {
       startExamTimer(session.startedAt);
@@ -2369,6 +2370,15 @@ const Session = {
   renderCurrent() {
     const q = this.currentQuestion();
     App.topMeta.textContent = `${this.s.title} · ${this.s.currentIndex + 1} / ${this.s.order.length}`;
+
+    // Сохраняем позицию прокрутки СТРАНИЦЫ. Экран перерисовывается целиком при
+    // любом действии (выбор варианта, «Проверить»), и без этого страница каждый
+    // раз прыгала наверх. Сохраняем скролл, если остаёмся на том же вопросе;
+    // при переходе на другой вопрос — наоборот, прокручиваем наверх (новый вопрос).
+    const _scroller = document.scrollingElement || document.documentElement;
+    const _prevScroll = _scroller ? _scroller.scrollTop : 0;
+    const _sameQuestion = (this._renderedIndex === this.s.currentIndex);
+    this._renderedIndex = this.s.currentIndex;
 
     // Восстановление UI при возврате «Назад» или перезагрузке страницы.
     //   • Экзамен: восстанавливаем ТОЛЬКО из изолированных ответов текущей
@@ -2503,6 +2513,13 @@ const Session = {
     // Счётчик
     App.root.appendChild(el('div', { class: 'nav-counter', style: 'margin-top:10px;' },
       `Вопрос ${this.s.currentIndex + 1} из ${this.s.order.length}`));
+
+    // Возврат прокрутки страницы (синхронно, до отрисовки кадра — без мигания).
+    // Тот же вопрос (выбор варианта / «Проверить») → остаёмся на месте.
+    // Другой вопрос (Дальше/Назад/палитра) → наверх, к началу нового вопроса.
+    if (_scroller) {
+      _scroller.scrollTop = _sameQuestion ? _prevScroll : 0;
+    }
   },
 
   renderQuestionCard(q) {
