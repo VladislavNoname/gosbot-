@@ -830,7 +830,7 @@ let QUESTIONS_ALL = [];  // Полный набор (включая search_only 
 
 // Версия сборки — видно в консоли при запуске, чтобы понять, какая версия
 // страницы реально загрузилась (а не из кэша Telegram WebView).
-const BUILD_VERSION = 'palette-scroll-2 (2026-05)';
+const BUILD_VERSION = 'palette-scroll-3-noflicker (2026-05)';
 console.log('[gosexam] BUILD_VERSION =', BUILD_VERSION);
 
 const QUESTIONS_URL = 'https://raw.githubusercontent.com/VladislavNoname/gosbot-/main/questions_miniapp.json';
@@ -2443,19 +2443,16 @@ const Session = {
         grid.appendChild(chip);
       });
       App.root.appendChild(grid);
-      // Сетка пересоздаётся при каждой перерисовке и скроллится в начало, из-за
-      // чего терялся текущий вопрос. Прокручиваем палитру к текущему вопросу.
-      // Сетка теперь position:relative, поэтому offsetTop чипа — это его смещение
-      // именно внутри сетки. Центрируем чип по вертикали и ограничиваем диапазон.
+      // Сетка пересоздаётся при каждой перерисовке и иначе скроллится в начало.
+      // Прокручиваем к текущему вопросу СИНХРОННО (до отрисовки кадра), иначе
+      // на миг виден кадр с прокруткой в начало → мигание. Чтение offsetTop/
+      // offsetHeight принудительно считает раскладку, поэтому значения корректны
+      // уже сейчас, без requestAnimationFrame.
       if (currentChip) {
-        const centerCurrent = () => {
-          const target = currentChip.offsetTop
-                        - (grid.clientHeight - currentChip.offsetHeight) / 2;
-          const maxScroll = grid.scrollHeight - grid.clientHeight;
-          grid.scrollTop = Math.max(0, Math.min(target, maxScroll));
-        };
-        // Двойной rAF — чтобы раскладка грида (aspect-ratio) успела посчитаться.
-        requestAnimationFrame(() => requestAnimationFrame(centerCurrent));
+        const target = currentChip.offsetTop
+                      - (grid.clientHeight - currentChip.offsetHeight) / 2;
+        const maxScroll = grid.scrollHeight - grid.clientHeight;
+        grid.scrollTop = Math.max(0, Math.min(target, maxScroll));
       }
     }
 
