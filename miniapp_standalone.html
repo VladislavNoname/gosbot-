@@ -2417,6 +2417,7 @@ const Session = {
       const grid = el('div', { class: 'question-grid' });
       const _sessionScope = this.s.scope || 'marathon';
       const _isSessionScoped = this.s.noRecord || _sessionScope === 'exam_mistakes';
+      let currentChip = null;
       this.s.order.forEach((qid, idx) => {
         // Для exam_mistakes / noRecord ответы хранятся локально в session,
         // в Store их нет. Для марафона/раздела — наоборот, читаем из Store.
@@ -2427,13 +2428,25 @@ const Session = {
         if (idx === this.s.currentIndex) classes.push('current');
         if (a && a.status === 'correct') classes.push('correct');
         if (a && a.status === 'wrong') classes.push('wrong');
-        grid.appendChild(el('button', {
+        const chip = el('button', {
           class: classes.join(' '),
           onclick: () => this.jumpTo(idx),
           title: `Вопрос ${idx + 1}`,
-        }, String(idx + 1)));
+        }, String(idx + 1));
+        if (idx === this.s.currentIndex) currentChip = chip;
+        grid.appendChild(chip);
       });
       App.root.appendChild(grid);
+      // Сетка пересоздаётся при каждой перерисовке и скроллится в начало, из-за
+      // чего терялся текущий вопрос (например, после ответа на №200 показывался
+      // снова №1). Прокручиваем палитру к текущему вопросу, чтобы он был виден.
+      if (currentChip) {
+        // requestAnimationFrame — чтобы размеры элементов уже посчитались.
+        requestAnimationFrame(() => {
+          const top = currentChip.offsetTop - grid.clientHeight / 2 + currentChip.clientHeight / 2;
+          grid.scrollTop = Math.max(0, top);
+        });
+      }
     }
 
     // Карточка вопроса
