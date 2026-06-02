@@ -5049,7 +5049,7 @@
     "options": [
       {
         "text": "во всех моделях",
-        "correct": true
+        "correct": false
       },
       {
         "text": "нормативная модель",
@@ -5057,7 +5057,7 @@
       },
       {
         "text": "позитивная модель",
-        "correct": false
+        "correct": true
       }
     ],
     "solution": "",
