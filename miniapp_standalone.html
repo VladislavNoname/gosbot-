@@ -927,8 +927,13 @@ const Store = {
   //                       при изменении набора вопросов или явной очистке марафона.
   //   lastMode         — текущий режим (марафон/экзамен)
   //   overrides        — пользовательские правки вопросов
+  //   statsStatus      — НЕЗАВИСИМАЯ общая статистика: { qid: {status,given,ts} }.
+  //                       Обновляется ЛЮБЫМ ответом (марафон/раздел/экзамен/работа над
+  //                       ошибками) по принципу «последний ответ побеждает». НЕ зависит
+  //                       от сбросов марафона/разделов/работы над ошибками. Чистится
+  //                       только из экрана статистики (или полным сбросом прогресса).
   data: { answers: {}, sectionAnswers: {}, examUsed: [], examMistakes: [],
-          examCorrect: [], marathonOrder: null,
+          examCorrect: [], marathonOrder: null, statsStatus: {},
           lastMode: null, overrides: {} },
   load() {
     try {
@@ -942,6 +947,35 @@ const Store = {
     if (!this.data.examCorrect)    this.data.examCorrect = [];
     if (this.data.marathonOrder === undefined) this.data.marathonOrder = null;
     if (!this.data.overrides)      this.data.overrides = {};
+    // Миграция общей статистики: если её ещё нет — строим из имеющихся пулов один раз,
+    // чтобы у существующих пользователей сохранились прежние цифры на главной.
+    if (this.data.statsStatus === undefined || this.data.statsStatus === null) {
+      this.data.statsStatus = this._buildStatsFromPools();
+    }
+  },
+  /** Разово собирает statsStatus из старых пулов (для миграции). Логика повторяет
+   *  прежний подсчёт главной: ошибки приоритетны, иначе верно из марафона/разделов/экзамена. */
+  _buildStatsFromPools() {
+    const stats = {};
+    const wrong = new Set((this.data.examMistakes || []).map(Number));
+    const ec    = new Set((this.data.examCorrect  || []).map(Number));
+    const ids   = new Set();
+    Object.keys(this.data.answers || {}).forEach(id => ids.add(Number(id)));
+    Object.keys(this.data.sectionAnswers || {}).forEach(id => ids.add(Number(id)));
+    wrong.forEach(id => ids.add(id));
+    ec.forEach(id => ids.add(id));
+    for (const id of ids) {
+      const a = this.data.answers[id] || this.data.answers[String(id)];
+      const b = this.data.sectionAnswers[id] || this.data.sectionAnswers[String(id)];
+      const combined = (a && b) ? ((a.ts || 0) >= (b.ts || 0) ? a : b) : (a || b);
+      let status, given;
+      if (wrong.has(id))                            { status = 'wrong';   given = combined ? combined.given : undefined; }
+      else if (combined && combined.status === 'correct') { status = 'correct'; given = combined.given; }
+      else if (ec.has(id))                          { status = 'correct'; given = undefined; }
+      else if (combined && combined.status === 'wrong')   { status = 'wrong';   given = combined.given; }
+      if (status) stats[id] = { status, given, ts: (combined && combined.ts) || 1 };
+    }
+    return stats;
   },
   save() {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(this.data)); }
@@ -971,7 +1005,20 @@ const Store = {
       this.data.examMistakes = Array.from(setM);
     }
 
+    this.recordStat(qid, status, given);   // обновляем общую статистику (последний ответ)
     this.save();
+  },
+  /** Обновить общую статистику по вопросу (последний ответ побеждает).
+   *  Вызывается из ВСЕХ режимов: марафон, разделы, экзамен, работа над ошибками.
+   *  Не сохраняет сам — вызывающий вызывает Store.save(). */
+  recordStat(qid, status, given) {
+    if (!this.data.statsStatus) this.data.statsStatus = {};
+    this.data.statsStatus[Number(qid)] = { status, given, ts: Date.now() };
+  },
+  /** Статус вопроса в общей статистике: 'correct' | 'wrong' | 'none'. */
+  statStatusOf(qid) {
+    const s = this.data.statsStatus && this.data.statsStatus[Number(qid)];
+    return s ? s.status : 'none';
   },
   /** Получить общую статистику по обоим пулам объединённо (нужно для главного экрана:
    * "сколько всего отвечено"). Уникализация по qid: если вопрос отвечен в обоих,
@@ -985,7 +1032,7 @@ const Store = {
   resetAll() {
     this.data = {
       answers: {}, sectionAnswers: {}, examUsed: [], examMistakes: [],
-      examCorrect: [], marathonOrder: null,
+      examCorrect: [], marathonOrder: null, statsStatus: {},
       lastMode: null, overrides: this.data.overrides || {},
     };
     this.save();
@@ -1014,6 +1061,14 @@ const Store = {
     }
     if (scope === 'section' || scope === 'all') {
       for (const id of ids) delete this.data.sectionAnswers[id];
+    }
+    if (scope === 'exam_mistakes') {
+      const rm = new Set(ids.map(Number));
+      this.data.examMistakes = (this.data.examMistakes || []).filter(x => !rm.has(Number(x)));
+    }
+    if (scope === 'stats') {
+      // Чистим ТОЛЬКО общую статистику. Марафон/разделы/ошибки не трогаем.
+      if (this.data.statsStatus) for (const id of ids) delete this.data.statsStatus[Number(id)];
     }
     // НЕ зовём this.save() (он сделал бы POST /progress который мерджит) —
     // вместо этого зовём localStorage напрямую + явный delete-answers на сервер.
@@ -1263,25 +1318,20 @@ const App = {
 
   renderHome() {
     this.topMeta.textContent = `Всего вопросов: ${QUESTIONS.length}`;
-    // Статистика главной:
-    //   • "Неверных" = размер examMistakes (то же число, что в "Работе над ошибками")
-    //   • "Верных"   = уникальные qid, отвеченные правильно в ЛЮБОМ источнике:
-    //                  марафон ∪ разделы ∪ экзамены (examCorrect). Считаем по одному
-    //                  разу на вопрос — поэтому "в экзамене и в марафоне" не задваивается.
-    //   • "Изучено%" = (верных + неверных) / всего
-    // Вопросы из examCorrect влияют на %, но НЕ помечаются как решённые в марафоне/
-    // разделах (там читаются только свои пулы) — это отдельный, «общий» учёт.
-    const wrongIds       = new Set((Store.data.examMistakes || []).map(Number));
-    const examCorrectIds = new Set((Store.data.examCorrect || []).map(Number));
-    let totalCorrect = 0;
+    // Общая статистика (НЕЗАВИСИМЫЙ пул statsStatus, «последний ответ побеждает»):
+    //   • Верных   = вопросов со status='correct'
+    //   • Неверных = вопросов со status='wrong'
+    //   • Изучено% = (верных + неверных) / всего
+    // Эти цифры НЕ зависят от сбросов марафона/разделов/работы над ошибками —
+    // меняются только когда ты отвечаешь на вопрос или чистишь статистику в её экране.
+    const _stats = Store.data.statsStatus || {};
+    let totalCorrect = 0, totalWrong = 0;
     for (const q of QUESTIONS) {
-      const id = Number(q.id);
-      if (wrongIds.has(id)) continue;  // ошибки приоритетны и не дублируются как верные
-      const a = Store.getCombinedAnswer(q.id);
-      const correctInPractice = a && a.status === 'correct';
-      if (correctInPractice || examCorrectIds.has(id)) totalCorrect++;
+      const s = _stats[Number(q.id)];
+      if (!s) continue;
+      if (s.status === 'correct') totalCorrect++;
+      else if (s.status === 'wrong') totalWrong++;
     }
-    const totalWrong    = wrongIds.size;
     const totalAnswered = totalCorrect + totalWrong;
     const pct = QUESTIONS.length ? Math.round(totalAnswered / QUESTIONS.length * 100) : 0;
 
@@ -1307,8 +1357,8 @@ const App = {
       ),
       // Открыть общую статистику по всем вопросам (в порядке, без перемешивания)
       el('button', {
-        class: 'btn-ghost',
-        style: 'width:100%;margin-top:10px;',
+        class: 'btn-primary',
+        style: 'width:100%;margin-top:12px;display:flex;align-items:center;justify-content:center;gap:8px;',
         onclick: () => App.renderStats(),
       }, '📊 Открыть статистику'),
     ));
@@ -1508,16 +1558,10 @@ const App = {
   },
 
   // Общая статистика по ВСЕМ вопросам: чипы по порядку (без перемешивания),
-  // зелёный = верно где-либо (марафон ∪ разделы ∪ экзамен ∪ работа над ошибками),
-  // красный = в пуле ошибок, серый = не отвечен. Клик по вопросу → разбор.
+  // зелёный = верно, красный = неверно, серый = не отвечен. Источник — НЕЗАВИСИМЫЙ
+  // пул Store.data.statsStatus («последний ответ побеждает»). Клик по вопросу → разбор.
   _statusOf(qid) {
-    const id = Number(qid);
-    if (this._statWrong && this._statWrong.has(id)) return 'wrong';
-    const a = Store.getCombinedAnswer(qid);
-    if (a && a.status === 'correct') return 'correct';
-    if (this._statCorrect && this._statCorrect.has(id)) return 'correct';
-    if (a && a.status === 'wrong') return 'wrong';
-    return 'none';
+    return Store.statStatusOf(qid);
   },
 
   renderStats() {
@@ -1526,20 +1570,20 @@ const App = {
     this.root.innerHTML = '';
     this.root.appendChild(el('button', { class: 'btn-ghost', onclick: () => App.goHome() }, '← К меню'));
 
-    // Кэшируем множества один раз на отрисовку (ошибки приоритетны над верными).
-    this._statWrong   = new Set((Store.data.examMistakes || []).map(Number));
-    this._statCorrect = new Set((Store.data.examCorrect  || []).map(Number));
-
+    const stats = Store.data.statsStatus || {};
     let c = 0, w = 0, n = 0;
     for (const q of QUESTIONS) {
-      const s = this._statusOf(q.id);
-      if (s === 'correct') c++; else if (s === 'wrong') w++; else n++;
+      const s = stats[Number(q.id)];
+      if (s && s.status === 'correct') c++;
+      else if (s && s.status === 'wrong') w++;
+      else n++;
     }
 
     this.root.appendChild(el('h2', { style: 'margin:14px 0 6px;' }, '📊 Статистика по всем вопросам'));
     this.root.appendChild(el('div', { class: 'muted small', style: 'margin-bottom:10px;' },
-      'Зелёный — отвечен верно, красный — неверно, серый — не отвечен. ' +
-      'Вопросы идут по порядку и не перемешиваются. Нажмите на вопрос, чтобы увидеть его и свой ответ.'));
+      'Зелёный — отвечен верно, красный — неверно, серый — не отвечен. Учитывается ПОСЛЕДНИЙ ответ ' +
+      'из любого режима. Вопросы идут по порядку и не перемешиваются. ' +
+      'Нажмите на вопрос, чтобы увидеть его и свой ответ.'));
 
     this.root.appendChild(el('div', { class: 'stats-bar', style: 'margin-bottom:14px;' },
       el('div', { class: 'stat-item' },
@@ -1553,26 +1597,47 @@ const App = {
         el('div', { class: 'stat-label' }, 'Не отвечено')),
     ));
 
-    const grid = el('div', { class: 'question-grid', style: 'max-height:62vh;margin:0;' });
+    const grid = el('div', { class: 'question-grid', style: 'max-height:62vh;margin:0 0 14px;' });
     QUESTIONS.forEach((q, idx) => {
-      const s = this._statusOf(q.id);
+      const s = stats[Number(q.id)];
       const classes = ['q-chip'];
-      if (s === 'correct') classes.push('correct');
-      if (s === 'wrong')   classes.push('wrong');
+      if (s && s.status === 'correct') classes.push('correct');
+      if (s && s.status === 'wrong')   classes.push('wrong');
       grid.appendChild(el('button', {
         class: classes.join(' '),
         title: `Вопрос ${idx + 1}`,
-        onclick: () => App._showStatDetail(q.id, idx + 1, s),
+        onclick: () => App._showStatDetail(q.id, idx + 1),
       }, String(idx + 1)));
     });
     this.root.appendChild(grid);
+
+    // Обнуление общей статистики — ТОЛЬКО отсюда. Не трогает марафон, разделы,
+    // работу над ошибками — только сам пул статистики.
+    if (c + w > 0) {
+      this.root.appendChild(el('button', {
+        class: 'btn-ghost',
+        style: 'width:100%;border-color: var(--wrong, #e74c3c); color: var(--wrong, #e74c3c);',
+        onclick: async () => {
+          if (!confirm(
+            `Обнулить общую статистику?\n\n` +
+            `Будет очищено ${c + w} отметок (верных и неверных). ` +
+            `Марафон, разделы и работа над ошибками НЕ затрагиваются.`
+          )) return;
+          const ids = Object.keys(Store.data.statsStatus || {}).map(Number);
+          await Store.resetSubsetWithCloud(ids, 'stats');
+          haptic.success();
+          App.renderStats();
+        },
+      }, `🗑 Обнулить статистику (${c + w})`));
+    }
   },
 
-  _showStatDetail(qid, num, status) {
+  _showStatDetail(qid, num) {
     const q = getQuestion(qid);
     if (!q) return;
-    const a = Store.getCombinedAnswer(qid);   // {status, given} если отвечал в марафоне/разделе
-    const given = a ? a.given : undefined;
+    const rec = (Store.data.statsStatus || {})[Number(qid)] || null;
+    const status = rec ? rec.status : 'none';
+    const given  = rec ? rec.given : undefined;
 
     const overlay = el('div', { class: 'modal-overlay' });
     const closeIt = () => { try { document.body.removeChild(overlay); } catch (e) {} };
@@ -3010,30 +3075,29 @@ const Session = {
         // 1) Локально для UI этой сессии — сохраняем (подсветка, палитра, итог "X/N").
         if (!this.s.sessionAnswers) this.s.sessionAnswers = {};
         this.s.sessionAnswers[q.id] = { status, given, ts: Date.now() };
-        // 2) Глобальный пул examMistakes:
-        //    - correct → qid УДАЛЯЕТСЯ из ошибок и ДОБАВЛЯЕТСЯ в examCorrect
-        //                (теперь он считается верным на главной и горит зелёным).
+        // 2) Глобальный пул examMistakes (очередь повторения):
+        //    - correct → qid УДАЛЯЕТСЯ из ошибок
         //    - wrong   → qid остаётся (надо отработать ещё)
+        // 3) Общая статистика (statsStatus) — обновляем ВСЕГДА (последний ответ):
+        //    верный ответ здесь → зелёный на главной/в статистике, неверный → красный.
         // marathon/section пулы НЕ трогаем.
+        Store.recordStat(q.id, status, given);
         if (status === 'correct') {
-          // Приводим всё к Number — иначе Set.delete не сработает из-за
-          // несовпадения типов (например, если в localStorage qid сохранены
-          // как строки из-за старой версии кода).
           const qidNum = Number(q.id);
           const beforeArr = (Store.data.examMistakes || []).map(Number);
           const setM = new Set(beforeArr);
           const hadIt = setM.has(qidNum);
           setM.delete(qidNum);
           Store.data.examMistakes = Array.from(setM);
-          // Засчитываем как верный в общий пул (главная страница, статистика).
+          // для обратной совместимости поддерживаем и старый пул examCorrect
           const setC = new Set((Store.data.examCorrect || []).map(Number));
           setC.add(qidNum);
           Store.data.examCorrect = Array.from(setC);
           console.log('[exam_mistakes] resolved qid=' + qidNum,
                       'mistakes before:', beforeArr.length, 'after:', setM.size,
                       'hadIt:', hadIt);
-          Store.save();  // → POST /progress с обновлёнными exam_mistakes + exam_correct
         }
+        Store.save();  // → POST /progress с обновлёнными пулами + stats_status
       } else {
         Store.recordAnswer(q.id, status, given, scope);
       }
@@ -3175,6 +3239,8 @@ const Session = {
       } else {
         mistakeSet.add(qid);                 // только реально неправильные ответы
       }
+      // Общая статистика: фиксируем последний ответ (верно/неверно) с выбором.
+      Store.recordStat(qid, stored.status, stored.given);
     }
     Store.data.examUsed     = Array.from(usedSet);
     Store.data.examMistakes = Array.from(mistakeSet);
@@ -3740,6 +3806,7 @@ Store.save = function() {
       exam_used:       Store.data.examUsed || [],
       exam_mistakes:   Store.data.examMistakes || [],
       exam_correct:    Store.data.examCorrect || [],
+      stats_status:    Store.data.statsStatus || {},
       last_mode:       Store.data.lastMode || null,
     }),
   });
@@ -3764,7 +3831,7 @@ Store.loadFromCloud = async function(cb) {
     if (isNewReset) {
       Store.data = {
         answers: {}, sectionAnswers: {}, examUsed: [], examMistakes: [],
-        examCorrect: [], marathonOrder: null,
+        examCorrect: [], marathonOrder: null, statsStatus: {},
         lastMode: null, overrides: Store.data.overrides || {},
       };
       _saveLocal();
@@ -3800,6 +3867,15 @@ Store.loadFromCloud = async function(cb) {
         ...((data.exam_correct || []).map(Number)),
       ]);
       Store.data.examCorrect = Array.from(correctSet);
+
+      // stats_status: МЕРЖ по ts (последний ответ побеждает), как answers.
+      // Отдельный пул общей статистики — не зависит от сбросов режимов.
+      const mergedStats = { ...(Store.data.statsStatus || {}) };
+      for (const [id, v] of Object.entries(data.stats_status || {})) {
+        const loc = mergedStats[id];
+        if (!loc || (v.ts || 0) >= (loc.ts || 0)) mergedStats[id] = v;
+      }
+      Store.data.statsStatus = mergedStats;
 
       // exam_mistakes: используем СЕРВЕРНУЮ версию как авторитативную.
       // Это критично для исправления: если юзер на устройстве A исправил qid
@@ -3846,7 +3922,7 @@ Store.loadFromCloud = async function(cb) {
 Store.resetWithApi = function() {
   Store.data = {
     answers: {}, sectionAnswers: {}, examUsed: [], examMistakes: [],
-    examCorrect: [], marathonOrder: null,
+    examCorrect: [], marathonOrder: null, statsStatus: {},
     lastMode: null, overrides: Store.data.overrides || {},
   };
   _saveLocal();
