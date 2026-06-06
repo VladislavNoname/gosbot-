@@ -919,9 +919,16 @@ const Store = {
   //   examMistakes     — массив qid, в которых юзер ошибся (или не ответил) в экзаменах.
   //                       Источник для "Работы над ошибками" дополнительно к marathon/section wrong.
   //                       При правильном повторе qid удаляется отсюда.
+  //   examCorrect      — массив qid, отвеченных ПРАВИЛЬНО в экзаменах. Влияет на
+  //                       «Изучено %» (общий пул), но НЕ помечает вопросы как решённые
+  //                       в марафоне/разделах (там свои пулы). Чистится только полным сбросом.
+  //   marathonOrder    — стабильный порядок вопросов марафона. Генерируется один раз
+  //                       и НЕ перемешивается при каждом входе. Пересоздаётся только
+  //                       при изменении набора вопросов или явной очистке марафона.
   //   lastMode         — текущий режим (марафон/экзамен)
   //   overrides        — пользовательские правки вопросов
   data: { answers: {}, sectionAnswers: {}, examUsed: [], examMistakes: [],
+          examCorrect: [], marathonOrder: null,
           lastMode: null, overrides: {} },
   load() {
     try {
@@ -932,6 +939,8 @@ const Store = {
     if (!this.data.sectionAnswers) this.data.sectionAnswers = {};
     if (!this.data.examUsed)       this.data.examUsed = [];
     if (!this.data.examMistakes)   this.data.examMistakes = [];
+    if (!this.data.examCorrect)    this.data.examCorrect = [];
+    if (this.data.marathonOrder === undefined) this.data.marathonOrder = null;
     if (!this.data.overrides)      this.data.overrides = {};
   },
   save() {
@@ -976,6 +985,7 @@ const Store = {
   resetAll() {
     this.data = {
       answers: {}, sectionAnswers: {}, examUsed: [], examMistakes: [],
+      examCorrect: [], marathonOrder: null,
       lastMode: null, overrides: this.data.overrides || {},
     };
     this.save();
@@ -1253,17 +1263,23 @@ const App = {
 
   renderHome() {
     this.topMeta.textContent = `Всего вопросов: ${QUESTIONS.length}`;
-    // Статистика главной — синхронизирована с пулом «Работы над ошибками»:
+    // Статистика главной:
     //   • "Неверных" = размер examMistakes (то же число, что в "Работе над ошибками")
-    //   • "Верных"   = уникальные qid с status='correct' в любом пуле (marathon/section)
+    //   • "Верных"   = уникальные qid, отвеченные правильно в ЛЮБОМ источнике:
+    //                  марафон ∪ разделы ∪ экзамены (examCorrect). Считаем по одному
+    //                  разу на вопрос — поэтому "в экзамене и в марафоне" не задваивается.
     //   • "Изучено%" = (верных + неверных) / всего
-    // Исправление вопроса в «Работе над ошибками» уменьшит "Неверных" автоматически.
-    const wrongIds = new Set((Store.data.examMistakes || []).map(Number));
+    // Вопросы из examCorrect влияют на %, но НЕ помечаются как решённые в марафоне/
+    // разделах (там читаются только свои пулы) — это отдельный, «общий» учёт.
+    const wrongIds       = new Set((Store.data.examMistakes || []).map(Number));
+    const examCorrectIds = new Set((Store.data.examCorrect || []).map(Number));
     let totalCorrect = 0;
     for (const q of QUESTIONS) {
-      if (wrongIds.has(Number(q.id))) continue;  // не двойной счёт
+      const id = Number(q.id);
+      if (wrongIds.has(id)) continue;  // ошибки приоритетны и не дублируются как верные
       const a = Store.getCombinedAnswer(q.id);
-      if (a && a.status === 'correct') totalCorrect++;
+      const correctInPractice = a && a.status === 'correct';
+      if (correctInPractice || examCorrectIds.has(id)) totalCorrect++;
     }
     const totalWrong    = wrongIds.size;
     const totalAnswered = totalCorrect + totalWrong;
@@ -1289,44 +1305,13 @@ const App = {
           el('div', { class: 'stat-label' }, 'Изучено')
         ),
       ),
+      // Открыть общую статистику по всем вопросам (в порядке, без перемешивания)
+      el('button', {
+        class: 'btn-ghost',
+        style: 'width:100%;margin-top:10px;',
+        onclick: () => App.renderStats(),
+      }, '📊 Открыть статистику'),
     ));
-
-    // Продолжить марафон
-    const _lmHasProgress = Store.data.lastMode && Store.data.lastMode.type === 'all' &&
-      Store.data.lastMode.order && Store.data.lastMode.order.some(id => Store.getAnswer(id, 'marathon'));
-    if (_lmHasProgress) {
-      const lm = Store.data.lastMode;
-      // Сколько ответов сейчас в пуле марафона (все тренажёрные вопросы)
-      const _marathonIds      = QUESTIONS.map(q => q.id);
-      const _marathonAnswered = _marathonIds.filter(id => Store.getAnswer(id, 'marathon')).length;
-      this.root.appendChild(el('div', { class: 'question-card', style: 'margin-bottom:18px;' },
-        el('div', { class: 'row between' },
-          el('div', {},
-            el('div', { style: 'font-weight:600;margin-bottom:4px;' }, '📌 Продолжить марафон'),
-            el('div', { class: 'muted small' }, `Остановились на вопросе ${lm.currentIndex + 1} из ${lm.order.length}`)
-          ),
-          el('div', { class: 'row', style: 'gap:6px;align-items:center;' },
-            el('button', {
-              class: 'btn-ghost small',
-              style: 'padding:6px 10px;font-size:13px;line-height:1;border-radius:8px;',
-              title: 'Сбросить прогресс марафона',
-              onclick: async () => {
-                if (!confirm(
-                  `Сбросить прогресс марафона?\n\n` +
-                  `Будет удалено ${_marathonAnswered} ответов и текущая позиция.\n` +
-                  `История экзаменов и правки вопросов сохранятся.`
-                )) return;
-                await Store.resetSubsetWithCloud(_marathonIds, 'marathon');
-                Store.clearLastMode();
-                haptic.success();
-                App.renderHome();
-              },
-            }, '🗑'),
-            el('button', { class: 'btn-primary', onclick: () => Mode.resumeAll() }, 'Продолжить'),
-          )
-        )
-      ));
-    }
 
     // Продолжить экзамен (если есть активный с оставшимся временем)
     // Показываем карточку даже без ответов — таймер уже тикает с момента старта.
@@ -1522,13 +1507,97 @@ const App = {
     this.root.appendChild(list);
   },
 
+  // Общая статистика по ВСЕМ вопросам: чипы по порядку (без перемешивания),
+  // зелёный = верно где-либо (марафон ∪ разделы ∪ экзамен ∪ работа над ошибками),
+  // красный = в пуле ошибок, серый = не отвечен. Клик по вопросу → разбор.
+  _statusOf(qid) {
+    const id = Number(qid);
+    if (this._statWrong && this._statWrong.has(id)) return 'wrong';
+    const a = Store.getCombinedAnswer(qid);
+    if (a && a.status === 'correct') return 'correct';
+    if (this._statCorrect && this._statCorrect.has(id)) return 'correct';
+    if (a && a.status === 'wrong') return 'wrong';
+    return 'none';
+  },
+
+  renderStats() {
+    this.state = null;
+    this.topMeta.textContent = 'Статистика';
+    this.root.innerHTML = '';
+    this.root.appendChild(el('button', { class: 'btn-ghost', onclick: () => App.goHome() }, '← К меню'));
+
+    // Кэшируем множества один раз на отрисовку (ошибки приоритетны над верными).
+    this._statWrong   = new Set((Store.data.examMistakes || []).map(Number));
+    this._statCorrect = new Set((Store.data.examCorrect  || []).map(Number));
+
+    let c = 0, w = 0, n = 0;
+    for (const q of QUESTIONS) {
+      const s = this._statusOf(q.id);
+      if (s === 'correct') c++; else if (s === 'wrong') w++; else n++;
+    }
+
+    this.root.appendChild(el('h2', { style: 'margin:14px 0 6px;' }, '📊 Статистика по всем вопросам'));
+    this.root.appendChild(el('div', { class: 'muted small', style: 'margin-bottom:10px;' },
+      'Зелёный — отвечен верно, красный — неверно, серый — не отвечен. ' +
+      'Вопросы идут по порядку и не перемешиваются. Нажмите на вопрос, чтобы увидеть его и свой ответ.'));
+
+    this.root.appendChild(el('div', { class: 'stats-bar', style: 'margin-bottom:14px;' },
+      el('div', { class: 'stat-item' },
+        el('div', { class: 'stat-value correct' }, String(c)),
+        el('div', { class: 'stat-label' }, 'Верных')),
+      el('div', { class: 'stat-item' },
+        el('div', { class: 'stat-value wrong' }, String(w)),
+        el('div', { class: 'stat-label' }, 'Неверных')),
+      el('div', { class: 'stat-item' },
+        el('div', { class: 'stat-value' }, String(n)),
+        el('div', { class: 'stat-label' }, 'Не отвечено')),
+    ));
+
+    const grid = el('div', { class: 'question-grid', style: 'max-height:62vh;margin:0;' });
+    QUESTIONS.forEach((q, idx) => {
+      const s = this._statusOf(q.id);
+      const classes = ['q-chip'];
+      if (s === 'correct') classes.push('correct');
+      if (s === 'wrong')   classes.push('wrong');
+      grid.appendChild(el('button', {
+        class: classes.join(' '),
+        title: `Вопрос ${idx + 1}`,
+        onclick: () => App._showStatDetail(q.id, idx + 1, s),
+      }, String(idx + 1)));
+    });
+    this.root.appendChild(grid);
+  },
+
+  _showStatDetail(qid, num, status) {
+    const q = getQuestion(qid);
+    if (!q) return;
+    const a = Store.getCombinedAnswer(qid);   // {status, given} если отвечал в марафоне/разделе
+    const given = a ? a.given : undefined;
+
+    const overlay = el('div', { class: 'modal-overlay' });
+    const closeIt = () => { try { document.body.removeChild(overlay); } catch (e) {} };
+    overlay.addEventListener('click', e => { if (e.target === overlay) closeIt(); });
+    const modal = el('div', { class: 'modal', style: 'max-width:620px;max-height:84vh;overflow:auto;text-align:left;' });
+
+    const badge = status === 'correct' ? '✅ Верно'
+                : status === 'wrong'   ? '❌ Неверно'
+                : '⚪ Не отвечено';
+    modal.appendChild(el('div', { class: 'modal-header' },
+      el('h3', { class: 'modal-title' }, `Вопрос ${num} · ${badge}`),
+      el('button', { class: 'modal-close', onclick: closeIt, title: 'Закрыть' }, '×')
+    ));
+    modal.appendChild(renderQuestionReviewCard(q, given, status));
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+  },
+
   renderErrorsMode() {
-    // «Работа над ошибками» — это ПУЛ ОШИБОК ЭКЗАМЕНОВ.
-    // Источник: Store.data.examMistakes (пополняется после экзамена qid,
-    // где юзер ошибся или не ответил). Wrong-ответы из марафона/разделов
-    // СЮДА НЕ ПОПАДАЮТ — там работают свои механизмы повторения.
+    // «Работа над ошибками» — общий ПУЛ ОШИБОК (Store.data.examMistakes).
+    // Сюда попадают неправильные ответы из марафона, разделов и экзаменов
+    // (пустые ответы экзамена — НЕ попадают). Каждый qid хранится один раз.
     //
-    // При правильном ответе на вопрос отсюда → qid удаляется из examMistakes.
+    // При правильном ответе на вопрос отсюда → qid удаляется из examMistakes
+    // и добавляется в examCorrect (засчитывается верным на главной/в статистике).
     // При неправильном — qid остаётся, юзер увидит его снова.
     // Хранилища марафона/разделов при этом НИКАК не затрагиваются.
     const errorIds = (Store.data.examMistakes || [])
@@ -1940,6 +2009,70 @@ function renderProgressNum(stats) {
   return span;
 }
 
+/* Карточка «разбор вопроса»: текст, картинка, варианты (правильный подсвечен,
+ * выбор пользователя помечен, если известен), решение. Используется в общей
+ * статистике при клике на вопрос.
+ *   given          — сохранённый ответ пользователя (индекс / массив текстов /
+ *                    порядок), либо undefined если конкретный выбор не сохранён
+ *                    (например, вопрос закрыт в экзамене или в работе над ошибками).
+ *   overallStatus  — 'correct' | 'wrong' | 'none' — итоговый статус вопроса.
+ */
+function renderQuestionReviewCard(q, given, overallStatus) {
+  const card = el('div', { class: 'question-card', style: 'text-align:left;' });
+  card.appendChild(el('div', { class: 'question-meta' },
+    el('span', { class: 'muted small', title: `id ${q.id}` },
+        q.section_title || (q.section != null ? `Раздел ${q.section}` : '')),
+  ));
+  if (q.image) {
+    card.appendChild(el('img', {
+      class: 'question-image', src: imageUrl(q.image), alt: '', loading: 'lazy',
+      style: 'max-width:100%;margin-bottom:8px;'
+    }));
+  }
+  card.appendChild(el('div', { class: 'question-text', style: 'font-size:14px;' }, q.text));
+
+  const hasGiven = given !== undefined && given !== null;
+
+  if (q.type === 'sequence') {
+    card.appendChild(el('div', { class: 'muted small', style: 'margin:8px 0 4px;' }, 'Правильный порядок:'));
+    card.appendChild(el('ol', { style: 'margin:0;padding-left:22px;' },
+      ...q.sequence.map(s => el('li', {}, s.text))));
+    if (hasGiven && Array.isArray(given)) {
+      card.appendChild(el('div', { class: 'muted small', style: 'margin:8px 0 4px;' }, 'Ваш порядок:'));
+      card.appendChild(el('ol', { style: 'margin:0;padding-left:22px;' },
+        ...given.map(t => el('li', {}, t))));
+    }
+  } else if (Array.isArray(q.options)) {
+    const opts = el('div', { class: 'options' });
+    q.options.forEach((o, oi) => {
+      const classes = ['option'];
+      let userPicked = false;
+      if (Array.isArray(given)) userPicked = given.includes(o.text);
+      else if (typeof given === 'number') userPicked = (given === oi);
+      if (o.correct) classes.push('reveal-correct');
+      if (userPicked && !o.correct) classes.push('wrong');
+      opts.appendChild(el('div', { class: classes.join(' ') },
+        el('div', { class: 'option-marker' + ((q.type === 'multi' || q.type === 'multiple') ? ' square' : '') }),
+        el('div', { class: 'option-text' }, o.text)
+      ));
+    });
+    card.appendChild(opts);
+  }
+
+  if (!hasGiven) {
+    let note;
+    if (overallStatus === 'correct') note = 'Отвечено верно (в экзамене или в работе над ошибками). Конкретный выбор не сохранён — выше отмечен правильный вариант.';
+    else if (overallStatus === 'wrong') note = 'Отвечено неверно. Конкретный выбор не сохранён — выше отмечен правильный вариант.';
+    else note = 'Вы ещё не отвечали на этот вопрос. Выше отмечен правильный вариант.';
+    card.appendChild(el('div', { class: 'muted small', style: 'margin-top:8px;' }, note));
+  }
+
+  if (q.solution) {
+    card.appendChild(el('div', { class: 'solution-block' }, el('strong', {}, '💡 '), q.solution));
+  }
+  return card;
+}
+
 /* =========================================================
    Режимы
    ========================================================= */
@@ -2087,8 +2220,9 @@ function _pickExamIds() {
 }
 
 const Mode = {
-  // Марафон вопросов: все вопросы перемешиваются при каждом входе.
-  // lastMode сохраняется ТОЛЬКО после первого ответа (в Session.persistLast).
+  // Марафон вопросов: СТАТИЧНЫЙ порядок (не перемешивается при каждом входе).
+  // Порядок генерируется один раз (Store.data.marathonOrder) и переиспользуется,
+  // пока не изменился набор вопросов или пользователь явно не очистил марафон.
   _firstUnanswered(order) {
     // Используется только для марафона (Mode.startAll) → scope='marathon'
     for (let i = 0; i < order.length; i++) {
@@ -2097,36 +2231,82 @@ const Mode = {
     return 0;
   },
 
+  // Возвращает стабильный порядок марафона. Создаёт и сохраняет его при первом
+  // обращении; пересоздаёт только если набор вопросов не совпадает с сохранённым
+  // (например, добавили/убрали вопросы) — иначе всегда отдаёт один и тот же порядок.
+  _marathonOrder() {
+    const ids   = QUESTIONS.map(q => q.id);
+    const covers = (arr) => Array.isArray(arr) && arr.length === ids.length &&
+                  (() => { const s = new Set(arr); return ids.every(id => s.has(id)); })();
+
+    // 1) Уже есть сохранённый стабильный порядок — используем его.
+    if (covers(Store.data.marathonOrder)) return Store.data.marathonOrder.slice();
+
+    // 2) Бесшовная миграция: у существующих пользователей порядок марафона лежал
+    //    в lastMode.order. Если он покрывает текущий набор вопросов — принимаем его
+    //    как стабильный (чтобы человек продолжил ровно ту же последовательность).
+    const lm = Store.data.lastMode;
+    if (lm && lm.type === 'all' && covers(lm.order)) {
+      Store.data.marathonOrder = lm.order.slice();
+      Store.save();
+      return Store.data.marathonOrder.slice();
+    }
+
+    // 3) Иначе — генерируем новый порядок один раз и фиксируем.
+    const order = shuffle(ids);
+    Store.data.marathonOrder = order;
+    Store.save();
+    return order.slice();
+  },
+
+  // Удалить ответы марафона, ПОРЯДОК СОХРАНЯЕТСЯ. После этого марафон начинается
+  // заново по той же последовательности (с первого вопроса).
+  async deleteMarathonAnswers() {
+    const ids = QUESTIONS.map(q => q.id);
+    await Store.resetSubsetWithCloud(ids, 'marathon');  // обнуляет ответы (локально+облако)
+    // marathonOrder НЕ трогаем — порядок остаётся прежним.
+    Store.clearLastMode();   // сбрасывает позицию (вход начнётся с первого вопроса)
+  },
+
+  // Перемешать вопросы: НОВЫЙ порядок, ответы СОХРАНЯЮТСЯ. Новый порядок фиксируется
+  // и используется при последующих входах (всё сохраняется в облако).
+  reshuffleMarathon() {
+    const ids = QUESTIONS.map(q => q.id);
+    const order = shuffle(ids);
+    Store.data.marathonOrder = order;
+    // Позицию приведём к новому порядку при старте (первый неотвеченный) —
+    // ответы при этом сохранены. lastMode обновится на новый порядок.
+    const lm = Store.data.lastMode;
+    if (lm && lm.type === 'all') { lm.order = order.slice(); lm.currentIndex = 0; lm.ts = Date.now(); }
+    Store.save();  // сохраняет новый порядок (и lastMode) в облако
+  },
+
   startAll() {
-    // Новый перемешанный порядок при каждом входе (lastMode пока не трогаем —
-    // он запишется в persistLast() после первого ответа).
-    const order = shuffle(QUESTIONS.map(q => q.id));
+    // Стабильный порядок (без перемешивания при входе). Заходим на первый
+    // неотвеченный вопрос, чтобы продолжать с места, не меняя порядок.
+    const order = this._marathonOrder();
     Session.start({
       kind: 'practice',
       title: 'Марафон вопросов',
       order,
-      currentIndex: 0,
+      currentIndex: this._firstUnanswered(order),
       saveAsLastMode: 'all',
       scope: 'marathon',
     });
   },
 
   resumeAll() {
+    const order = this._marathonOrder();
     const lm = Store.data.lastMode;
-    if (!lm) return this.startAll();
-    // Если нет ни одного ответа (после сброса) → startAll с перемешиванием
-    const hasAnyAnswer = lm.order && lm.order.some(id => Store.getAnswer(id, 'marathon'));
-    if (!hasAnyAnswer) return this.startAll();
+    let startIdx = (lm && lm.type === 'all') ? (lm.currentIndex || 0) : 0;
     // Ищем первый неотвеченный начиная с сохранённой позиции
-    const saved = lm.currentIndex || 0;
-    let startIdx = saved;
-    for (let i = saved; i < lm.order.length; i++) {
-      if (!Store.getAnswer(lm.order[i], 'marathon')) { startIdx = i; break; }
+    for (let i = startIdx; i < order.length; i++) {
+      if (!Store.getAnswer(order[i], 'marathon')) { startIdx = i; break; }
     }
     Session.start({
       kind: 'practice',
       title: 'Марафон вопросов',
-      order: lm.order,
+      order,
       currentIndex: startIdx,
       saveAsLastMode: 'all',
       scope: 'marathon',
@@ -2414,14 +2594,58 @@ const Session = {
     // Верхняя панель: для экзамена — умная кнопка «Меню» (диалог если есть ответы),
     // и таймер. Для остальных режимов — обычная кнопка и метаданные темы.
     const isExam = this.s.kind === 'exam';
+    const _isMarathon = !isExam && !this.s.noRecord && !this.s.freshStart &&
+                        this.s.scope === 'marathon';
     const headerLeft = isExam
       ? el('button', { class: 'btn-ghost', onclick: () => this.handleExitExam() }, '← Меню')
       : el('button', { class: 'btn-ghost', onclick: () => App.goHome() }, '← Меню');
-    const headerRight = isExam
-      ? el('span', { id: 'exam-timer', style: 'font-size:14px;font-weight:600;' },
-          '⏱ ' + _fmtTimer(examRemainingMs(Store.data.lastMode)))
-      : el('div', { class: 'muted small' }, q.topic ? `${q.topic}. ${q.topic_title}` : (q.section_title || ''));
+    let headerRight;
+    if (isExam) {
+      headerRight = el('span', { id: 'exam-timer', style: 'font-size:14px;font-weight:600;' },
+          '⏱ ' + _fmtTimer(examRemainingMs(Store.data.lastMode)));
+    } else {
+      headerRight = el('div', { class: 'muted small' }, q.topic ? `${q.topic}. ${q.topic_title}` : (q.section_title || ''));
+    }
     App.root.appendChild(el('div', { class: 'row between' }, headerLeft, headerRight));
+
+    // Марафон: две кнопки сверху — «Удалить ответы» (порядок сохраняется) и
+    // «Перемешать» (новый порядок, ответы сохраняются). Всё в реальном времени.
+    if (_isMarathon) {
+      const ids = QUESTIONS.map(qq => qq.id);
+      const toolbar = el('div', { class: 'row', style: 'gap:8px;margin-top:10px;' },
+        el('button', {
+          class: 'btn-ghost small',
+          style: 'flex:1;padding:8px 10px;font-size:13px;line-height:1;border-radius:8px;',
+          title: 'Обнулить ответы марафона (порядок сохранится)',
+          onclick: async () => {
+            const answered = ids.filter(id => Store.getAnswer(id, 'marathon')).length;
+            if (!confirm(
+              `Удалить все ответы марафона?\n\n` +
+              `Будет обнулено ${answered} ответов. Порядок вопросов сохранится.\n` +
+              `Разделы, экзамены и работа над ошибками не затрагиваются.`
+            )) return;
+            await Mode.deleteMarathonAnswers();
+            haptic.success();
+            Mode.startAll();   // тот же порядок, с первого вопроса
+          },
+        }, '🗑 Удалить ответы'),
+        el('button', {
+          class: 'btn-ghost small',
+          style: 'flex:1;padding:8px 10px;font-size:13px;line-height:1;border-radius:8px;',
+          title: 'Перемешать вопросы (ответы сохранятся)',
+          onclick: () => {
+            if (!confirm(
+              `Перемешать вопросы марафона?\n\n` +
+              `Порядок изменится, а ответы сохранятся.`
+            )) return;
+            Mode.reshuffleMarathon();
+            haptic.success();
+            Mode.startAll();   // новый порядок, продолжаем с первого неотвеченного
+          },
+        }, '🔀 Перемешать'),
+      );
+      App.root.appendChild(toolbar);
+    }
 
     // Прогресс-бар по сессии
     const progress = Math.round((this.s.currentIndex + 1) / this.s.order.length * 100);
@@ -2787,7 +3011,8 @@ const Session = {
         if (!this.s.sessionAnswers) this.s.sessionAnswers = {};
         this.s.sessionAnswers[q.id] = { status, given, ts: Date.now() };
         // 2) Глобальный пул examMistakes:
-        //    - correct → qid УДАЛЯЕТСЯ (юзер закрыл этот вопрос)
+        //    - correct → qid УДАЛЯЕТСЯ из ошибок и ДОБАВЛЯЕТСЯ в examCorrect
+        //                (теперь он считается верным на главной и горит зелёным).
         //    - wrong   → qid остаётся (надо отработать ещё)
         // marathon/section пулы НЕ трогаем.
         if (status === 'correct') {
@@ -2800,10 +3025,14 @@ const Session = {
           const hadIt = setM.has(qidNum);
           setM.delete(qidNum);
           Store.data.examMistakes = Array.from(setM);
-          console.log('[exam_mistakes] removing qid=' + qidNum,
-                      'before:', beforeArr.length, 'after:', setM.size,
+          // Засчитываем как верный в общий пул (главная страница, статистика).
+          const setC = new Set((Store.data.examCorrect || []).map(Number));
+          setC.add(qidNum);
+          Store.data.examCorrect = Array.from(setC);
+          console.log('[exam_mistakes] resolved qid=' + qidNum,
+                      'mistakes before:', beforeArr.length, 'after:', setM.size,
                       'hadIt:', hadIt);
-          Store.save();  // → POST /progress с обновлённым exam_mistakes (REPLACE)
+          Store.save();  // → POST /progress с обновлёнными exam_mistakes + exam_correct
         }
       } else {
         Store.recordAnswer(q.id, status, given, scope);
@@ -2928,21 +3157,28 @@ const Session = {
       else sectionsStats[sNum].wrong++;
     }
 
-    // Пополняем:
-    //   1) examUsed — qid'ами этой попытки (для уникальности следующих экзаменов)
-    //   2) examMistakes — qid где юзер ошибся ИЛИ не ответил.
-    //      Правильные ответы examMistakes НЕ удаляют — пул чистится только вручную.
+    // Пополняем три пула по вопросам этой попытки:
+    //   1) examUsed     — все qid попытки (для уникальности следующих экзаменов)
+    //   2) examCorrect  — qid, отвеченные ПРАВИЛЬНО (влияют на «Изучено %»)
+    //   3) examMistakes — qid, отвеченные НЕПРАВИЛЬНО (идут в «Работу над ошибками»)
+    // Пустые (неотвеченные) вопросы НЕ считаются ошибкой и НЕ пишутся в «Работу
+    // над ошибками» — при выходе/завершении экзамена они просто игнорируются.
     const usedSet    = new Set(Store.data.examUsed || []);
     const mistakeSet = new Set(Store.data.examMistakes || []);
+    const correctSet = new Set((Store.data.examCorrect || []).map(Number));
     for (const qid of this.s.order) {
       usedSet.add(qid);
       const stored = examAnswers[qid];
-      if (!stored || stored.status !== 'correct') {
-        mistakeSet.add(qid);
+      if (!stored) continue;                 // пустой ответ — пропускаем (не ошибка)
+      if (stored.status === 'correct') {
+        correctSet.add(Number(qid));
+      } else {
+        mistakeSet.add(qid);                 // только реально неправильные ответы
       }
     }
     Store.data.examUsed     = Array.from(usedSet);
     Store.data.examMistakes = Array.from(mistakeSet);
+    Store.data.examCorrect  = Array.from(correctSet);
     Store.save();
 
     // Пишем попытку в облако (если есть авторизация). Дубль защищён started_at в API.
@@ -3503,6 +3739,7 @@ Store.save = function() {
       section_answers: Store.data.sectionAnswers || {},
       exam_used:       Store.data.examUsed || [],
       exam_mistakes:   Store.data.examMistakes || [],
+      exam_correct:    Store.data.examCorrect || [],
       last_mode:       Store.data.lastMode || null,
     }),
   });
@@ -3527,6 +3764,7 @@ Store.loadFromCloud = async function(cb) {
     if (isNewReset) {
       Store.data = {
         answers: {}, sectionAnswers: {}, examUsed: [], examMistakes: [],
+        examCorrect: [], marathonOrder: null,
         lastMode: null, overrides: Store.data.overrides || {},
       };
       _saveLocal();
@@ -3554,6 +3792,14 @@ Store.loadFromCloud = async function(cb) {
       // Используем union чтобы в worst case не потерять ничего при гонке двух устройств.
       const usedSet = new Set([...(Store.data.examUsed || []), ...(data.exam_used || [])]);
       Store.data.examUsed = Array.from(usedSet);
+
+      // exam_correct: union (правильные ответы экзаменов только накапливаются,
+      // чистятся лишь полным сбросом). Нормализуем к Number для единообразия.
+      const correctSet = new Set([
+        ...(Store.data.examCorrect || []).map(Number),
+        ...((data.exam_correct || []).map(Number)),
+      ]);
+      Store.data.examCorrect = Array.from(correctSet);
 
       // exam_mistakes: используем СЕРВЕРНУЮ версию как авторитативную.
       // Это критично для исправления: если юзер на устройстве A исправил qid
@@ -3600,6 +3846,7 @@ Store.loadFromCloud = async function(cb) {
 Store.resetWithApi = function() {
   Store.data = {
     answers: {}, sectionAnswers: {}, examUsed: [], examMistakes: [],
+    examCorrect: [], marathonOrder: null,
     lastMode: null, overrides: Store.data.overrides || {},
   };
   _saveLocal();
