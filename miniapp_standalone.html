@@ -2007,8 +2007,58 @@ const App = {
         card.appendChild(secList);
       }
 
+      // Кнопка просмотра ответов по вопросам (если попытка сохранила детали).
+      const qs = (attempt.details && attempt.details.questions) || [];
+      if (qs.length) {
+        card.appendChild(el('button', {
+          class: 'btn-ghost',
+          style: 'width:100%;margin-top:10px;',
+          onclick: () => App.renderExamAttemptReview(attempt),
+        }, '🔍 Посмотреть ответы'));
+      } else {
+        card.appendChild(el('div', { class: 'muted small', style: 'margin-top:10px;font-style:italic;' },
+          'Разбор по вопросам недоступен для этой попытки (сохранена до обновления).'));
+      }
+
       list.appendChild(card);
     });
+    this.root.appendChild(list);
+  },
+
+  // Разбор конкретной ПРОШЛОЙ попытки: вопросы подтягиваются из текущей базы
+  // по id, пометки (верно/неверно/пропущен) — из сохранённых ответов попытки.
+  renderExamAttemptReview(attempt) {
+    this.topMeta.textContent = 'Разбор экзамена';
+    this.root.innerHTML = '';
+    this.root.appendChild(el('button', { class: 'btn-ghost', onclick: () => App.renderExamHistory() }, '← К истории'));
+
+    const total   = attempt.total || 0;
+    const correct = attempt.correct || 0;
+    const pct     = total ? Math.round(correct / total * 100) : 0;
+    const fmtDate = ts => {
+      const d = new Date(ts); const pad = n => String(n).padStart(2, '0');
+      return `${pad(d.getDate())}.${pad(d.getMonth()+1)}.${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    };
+    this.root.appendChild(el('div', { class: 'result-banner', style: 'margin-top:12px;' },
+      el('div', { class: 'muted' }, fmtDate(attempt.finished_at)),
+      el('div', { class: 'result-score' }, `${correct} / ${total}`),
+      el('div', { class: 'result-grade' }, `${pct}%`),
+    ));
+
+    const qs = (attempt.details && attempt.details.questions) || [];
+    // Считаем пропущенные/верные/неверные для краткой сводки
+    let nSkip = 0, nCorr = 0, nWrong = 0;
+    const results = qs.map(item => {
+      const q = getQuestion(item.id);
+      if (!item.answered) nSkip++; else if (item.status === 'correct') nCorr++; else nWrong++;
+      return { q, given: item.given, status: item.status, answered: !!item.answered };
+    });
+    this.root.appendChild(el('div', { class: 'muted small', style: 'margin:10px 0 4px;' },
+      `Отвечено верно: ${nCorr} · неверно: ${nWrong} · пропущено: ${nSkip}`));
+
+    this.root.appendChild(el('h2', {}, 'Подробный разбор'));
+    const list = el('div', { class: 'topic-list' });
+    results.forEach((r, idx) => list.appendChild(Session._resultCard(r, idx)));
     this.root.appendChild(list);
   },
 
@@ -3259,6 +3309,15 @@ const Session = {
         details: {
           sections: Object.values(sectionsStats)
             .sort((a, b) => a.number - b.number),
+          // Подробности по каждому вопросу — чтобы потом можно было открыть
+          // прошлый экзамен и посмотреть вопросы с пометками. Текст вопросов
+          // не храним (подтягиваем из базы по id при просмотре).
+          questions: results.map(r => ({
+            id:       r.q ? r.q.id : null,
+            given:    r.given,
+            status:   r.status,
+            answered: !!r.answered,
+          })),
         },
       };
       saveExamAttempt(attempt);  // fire-and-forget
@@ -3313,58 +3372,81 @@ const Session = {
     // Список вопросов с разбором
     App.root.appendChild(el('h2', {}, 'Подробный разбор'));
     const list = el('div', { class: 'topic-list' });
-    results.forEach((r, idx) => {
-      const card = el('div', { class: 'question-card' });
-      card.appendChild(el('div', { class: 'question-meta' },
-        el('div', {},
-          el('span', { class: `question-tag ${r.status === 'correct' ? '' : ''}`,
-            style: `background:${r.status === 'correct' ? 'var(--correct-bg)' : 'var(--wrong-bg)'};color:${r.status === 'correct' ? 'var(--correct)' : 'var(--wrong)'};` },
-            r.status === 'correct' ? '✓' : '✗'),
-          el('span', { class: 'muted small' }, ` Вопрос ${idx + 1}`)
-        ),
-        el('span', { class: 'muted small', title: `id ${r.q.id}` },
-            r.q.section_title || (r.q.section != null ? `Раздел ${r.q.section}` : ''))
-      ));
-      if (r.q.image) {
-        card.appendChild(el('img', {
-          class: 'question-image', src: imageUrl(r.q.image), alt: '', loading: 'lazy',
-          style: 'max-width:100%;margin-bottom:8px;'
-        }));
-      }
-      card.appendChild(el('div', { class: 'question-text', style: 'font-size:14px;' }, r.q.text));
-
-      // показать правильные варианты
-      if (r.q.type === 'sequence') {
-        const ol = el('ol', { style: 'margin:0;padding-left:22px;' },
-          ...r.q.sequence.map(s => el('li', {}, s.text))
-        );
-        card.appendChild(el('div', { class: 'muted small', style: 'margin-bottom:4px;' }, 'Правильный порядок:'));
-        card.appendChild(ol);
-      } else {
-        const opts = el('div', { class: 'options' });
-        r.q.options.forEach((o, oi) => {
-          const classes = ['option'];
-          // given для single = индекс (число), для multi = массив текстов
-          let userPicked = false;
-          if (Array.isArray(r.given)) userPicked = r.given.includes(o.text);
-          else userPicked = (r.given === oi);
-          if (o.correct) classes.push('reveal-correct');
-          if (userPicked && !o.correct) classes.push('wrong');
-          opts.appendChild(el('div', { class: classes.join(' ') },
-            el('div', { class: 'option-marker' + ((r.q.type === 'multi' || r.q.type === 'multiple') ? ' square' : '') }),
-            el('div', { class: 'option-text' }, o.text)
-          ));
-        });
-        card.appendChild(opts);
-      }
-      if (r.q.solution) {
-        card.appendChild(el('div', { class: 'solution-block' },
-          el('strong', {}, '💡 '), r.q.solution
-        ));
-      }
-      list.appendChild(card);
-    });
+    results.forEach((r, idx) => list.appendChild(this._resultCard(r, idx)));
     App.root.appendChild(list);
+  },
+
+  // Карточка одного вопроса в разборе экзамена.
+  //   r = { q, given, status, answered }
+  //   • Пропущен (!answered) — НЕ раскрываем правильный ответ, метка «Пропущен».
+  //   • Правильно — зелёным правильный, метка «Отвечен правильно».
+  //   • Неправильно — красным выбор пользователя + зелёным правильный,
+  //     метка «Отвечен неправильно».
+  _resultCard(r, idx) {
+    const q = r.q;
+    const skipped = !r.answered;
+    const correct = r.answered && r.status === 'correct';
+
+    let tag, tagBg, tagColor, label, labelColor;
+    if (skipped)      { tag = '–'; tagBg = 'var(--bg)';         tagColor = 'var(--muted)';   label = 'Пропущен';            labelColor = 'var(--muted)'; }
+    else if (correct) { tag = '✓'; tagBg = 'var(--correct-bg)'; tagColor = 'var(--correct)'; label = 'Отвечен правильно';   labelColor = 'var(--correct)'; }
+    else              { tag = '✗'; tagBg = 'var(--wrong-bg)';   tagColor = 'var(--wrong)';   label = 'Отвечен неправильно'; labelColor = 'var(--wrong)'; }
+
+    const card = el('div', { class: 'question-card' });
+    card.appendChild(el('div', { class: 'question-meta' },
+      el('div', {},
+        el('span', { class: 'question-tag', style: `background:${tagBg};color:${tagColor};` }, tag),
+        el('span', { class: 'muted small' }, ` Вопрос ${idx + 1}`)
+      ),
+      el('span', { class: 'muted small', title: q ? `id ${q.id}` : '' },
+          q ? (q.section_title || (q.section != null ? `Раздел ${q.section}` : '')) : '')
+    ));
+
+    // Подпись-метка статуса
+    card.appendChild(el('div', { style: `font-weight:600;font-size:13px;margin:2px 0 8px;color:${labelColor};` }, label));
+
+    if (!q) {
+      card.appendChild(el('div', { class: 'muted small' }, 'Вопрос удалён из базы — текст недоступен.'));
+      return card;
+    }
+
+    if (q.image) {
+      card.appendChild(el('img', {
+        class: 'question-image', src: imageUrl(q.image), alt: '', loading: 'lazy',
+        style: 'max-width:100%;margin-bottom:8px;'
+      }));
+    }
+    card.appendChild(el('div', { class: 'question-text', style: 'font-size:14px;' }, q.text));
+
+    if (q.type === 'sequence') {
+      // Пропущенный — порядок не раскрываем.
+      if (!skipped) {
+        card.appendChild(el('div', { class: 'muted small', style: 'margin-bottom:4px;' }, 'Правильный порядок:'));
+        card.appendChild(el('ol', { style: 'margin:0;padding-left:22px;' },
+          ...q.sequence.map(s => el('li', {}, s.text))));
+      }
+    } else if (Array.isArray(q.options)) {
+      const opts = el('div', { class: 'options' });
+      q.options.forEach((o, oi) => {
+        const classes = ['option'];
+        if (!skipped) {
+          let userPicked = Array.isArray(r.given) ? r.given.includes(o.text) : (r.given === oi);
+          if (o.correct) classes.push('reveal-correct');         // правильный — зелёным
+          if (userPicked && !o.correct) classes.push('wrong');   // выбор пользователя (неверный) — красным
+        }
+        opts.appendChild(el('div', { class: classes.join(' ') },
+          el('div', { class: 'option-marker' + ((q.type === 'multi' || q.type === 'multiple') ? ' square' : '') }),
+          el('div', { class: 'option-text' }, o.text)
+        ));
+      });
+      card.appendChild(opts);
+    }
+
+    // Пояснение показываем только для отвеченных (пропущенный не раскрываем).
+    if (q.solution && !skipped) {
+      card.appendChild(el('div', { class: 'solution-block' }, el('strong', {}, '💡 '), q.solution));
+    }
+    return card;
   },
 
   renderPracticeEnd() {
