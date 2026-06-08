@@ -2837,16 +2837,16 @@ const Session = {
       label = 'Дальше →';
       action = () => this.goNext();
     }
-    nav.appendChild(el('button', { class: 'btn-primary', onclick: action }, label));
-
-    // Дополнительная кнопка «Пропустить» (только до проверки, не на последнем) —
-    // на случай если человек не знает ответа и хочет двигаться дальше
+    // «Пропустить» теперь идёт ПЕРЕД основной кнопкой, чтобы крайней справа
+    // (где обычно жмут) был «Проверить», а не «Пропустить» — люди промахивались.
     if (!checked && !isLast) {
       nav.appendChild(el('button', {
         class: 'btn-ghost',
         onclick: () => this.goNext(),
       }, 'Пропустить'));
     }
+
+    nav.appendChild(el('button', { class: 'btn-primary', onclick: action }, label));
 
     App.root.appendChild(nav);
 
