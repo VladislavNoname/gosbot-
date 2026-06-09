@@ -830,7 +830,7 @@ let QUESTIONS_ALL = [];  // Полный набор (включая search_only 
 
 // Версия сборки — видно в консоли при запуске, чтобы понять, какая версия
 // страницы реально загрузилась (а не из кэша Telegram WebView).
-const BUILD_VERSION = 'network-first-questions-7 (2026-06)';
+const BUILD_VERSION = 'marathon-palette-8 (2026-06)';
 console.log('[gosexam] BUILD_VERSION =', BUILD_VERSION);
 
 const QUESTIONS_URL = 'https://raw.githubusercontent.com/VladislavNoname/gosbot-/main/questions_miniapp.json';
@@ -2780,8 +2780,10 @@ const Session = {
       el('div', { class: 'progress-fill', style: `width:${progress}%` })
     ));
 
-    // Палитра вопросов (только для practice с >1 вопросом и не слишком длинной сессии)
-    if (this.s.kind === 'practice' && this.s.order.length > 1 && this.s.order.length <= 500) {
+    // Палитра вопросов (для practice с >1 вопросом). Верхний предел большой,
+    // чтобы марафон (500+ вопросов) тоже показывал сетку номеров, как разделы.
+    // Сетка скроллится (max-height в CSS) и сама прокручивается к текущему чипу.
+    if (this.s.kind === 'practice' && this.s.order.length > 1 && this.s.order.length <= 5000) {
       const grid = el('div', { class: 'question-grid' });
       const _sessionScope = this.s.scope || 'marathon';
       const _isSessionScoped = this.s.noRecord || _sessionScope === 'exam_mistakes';
