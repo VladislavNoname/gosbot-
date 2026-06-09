@@ -29,6 +29,32 @@
     "solution": "",
     "source": "ГОСЫ_2026.docx"
   },
+    {
+  "id": 846,
+  "section": 1,
+  "section_title": "АРХИТЕКТУРА ПРЕДПРИЯТИЯ",
+  "topic": "1.1",
+  "topic_title": "Архитектура предприятия",
+  "type": "single",
+  "is_calc": false,
+  "text": "Пример базового домена технологической архитектуры:",
+  "options": [
+    {
+      "text": "(1) БД",
+      "correct": false
+    },
+    {
+      "text": "(2) данные",
+      "correct": false
+    },
+    {
+      "text": "(3) СУБД",
+      "correct": true
+    }
+  ],
+  "solution": "",
+  "source": "ГОСЫ_2026.docx"
+},
   {
     "id": 331,
     "section": 1,
