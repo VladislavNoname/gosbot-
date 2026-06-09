@@ -830,7 +830,7 @@ let QUESTIONS_ALL = [];  // Полный набор (включая search_only 
 
 // Версия сборки — видно в консоли при запуске, чтобы понять, какая версия
 // страницы реально загрузилась (а не из кэша Telegram WebView).
-const BUILD_VERSION = 'palette-scroll-5-stay (2026-05)';
+const BUILD_VERSION = 'network-first-questions-6 (2026-06)';
 console.log('[gosexam] BUILD_VERSION =', BUILD_VERSION);
 
 const QUESTIONS_URL = 'https://raw.githubusercontent.com/VladislavNoname/gosbot-/main/questions_miniapp.json';
@@ -860,41 +860,53 @@ function _rebuildIndex() {
 
 // ── Расшифровка вопросов (AES-256-GCM, Web Crypto API) ──────
 async function loadQuestions() {
-  // Проверяем кэш (30 мин)
+  // Стратегия: СНАЧАЛА СЕТЬ (всегда свежие вопросы), кэш — только как
+  // запасной вариант при отсутствии связи. Так правки на сервере видны сразу,
+  // без 30-минутной задержки и без залипания в HTTP-кэше WebView.
+  const user     = tg?.initDataUnsafe?.user;
+  const initData = tg?.initData || '';
+  const useApi   = user?.id && initData && API_URL && !API_URL.includes('ВАШ_ДОМЕН') && API_URL.startsWith('https');
+
   try {
-    const ts = parseInt(localStorage.getItem(Q_CACHE_TS) || '0');
-    if (Date.now() - ts < Q_CACHE_TTL) {
+    let data;
+    if (useApi) {
+      // ?t= + cache:'no-store' — чтобы Telegram WebView не отдавал старый ответ из HTTP-кэша
+      const r = await fetch(`${API_URL}/questions?t=${Date.now()}`, {
+        cache: 'no-store',
+        headers: { 'Authorization': 'TgInitData ' + initData },
+      });
+      if (r.status === 403) throw new Error('ACCESS_DENIED');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      data = await r.json();
+    } else {
+      const r = await fetch(QUESTIONS_URL + '?t=' + Date.now(), { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      data = await r.json();
+    }
+
+    QUESTIONS_ALL = data;
+    _rebuildIndex();
+    // Обновляем кэш (он теперь нужен только для офлайна)
+    try {
+      localStorage.setItem(Q_CACHE_KEY, JSON.stringify(QUESTIONS_ALL));
+      localStorage.setItem(Q_CACHE_TS, String(Date.now()));
+    } catch(e) {}
+    return;
+  } catch (netErr) {
+    // Отказ в доступе — это не проблема сети, ведём себя как раньше.
+    if (netErr && netErr.message === 'ACCESS_DENIED') throw netErr;
+    // Сеть недоступна → пробуем последний сохранённый кэш (офлайн-режим).
+    try {
       const cached = localStorage.getItem(Q_CACHE_KEY);
       if (cached) {
         QUESTIONS_ALL = JSON.parse(cached);
         _rebuildIndex();
         return;
       }
-    }
-  } catch(e) {}
-
-  const user     = tg?.initDataUnsafe?.user;
-  const initData = tg?.initData || '';
-  const useApi   = user?.id && initData && API_URL && !API_URL.includes('ВАШ_ДОМЕН') && API_URL.startsWith('https');
-
-  if (useApi) {
-    const r = await fetch(`${API_URL}/questions`, {
-      headers: { 'Authorization': 'TgInitData ' + initData },
-    });
-    if (r.status === 403) throw new Error('ACCESS_DENIED');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    QUESTIONS_ALL = await r.json();
-  } else {
-    const r = await fetch(QUESTIONS_URL + '?t=' + Date.now());
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    QUESTIONS_ALL = await r.json();
+    } catch(e) {}
+    // Ни сети, ни кэша — пробрасываем исходную ошибку.
+    throw netErr;
   }
-
-  _rebuildIndex();
-  try {
-    localStorage.setItem(Q_CACHE_KEY, JSON.stringify(QUESTIONS_ALL));
-    localStorage.setItem(Q_CACHE_TS, String(Date.now()));
-  } catch(e) {}
 }
 
 const STORAGE_KEY = 'gosexam_progress_v1';
@@ -2837,16 +2849,16 @@ const Session = {
       label = 'Дальше →';
       action = () => this.goNext();
     }
-    // «Пропустить» теперь идёт ПЕРЕД основной кнопкой, чтобы крайней справа
-    // (где обычно жмут) был «Проверить», а не «Пропустить» — люди промахивались.
+    nav.appendChild(el('button', { class: 'btn-primary', onclick: action }, label));
+
+    // Дополнительная кнопка «Пропустить» (только до проверки, не на последнем) —
+    // на случай если человек не знает ответа и хочет двигаться дальше
     if (!checked && !isLast) {
       nav.appendChild(el('button', {
         class: 'btn-ghost',
         onclick: () => this.goNext(),
       }, 'Пропустить'));
     }
-
-    nav.appendChild(el('button', { class: 'btn-primary', onclick: action }, label));
 
     App.root.appendChild(nav);
 
