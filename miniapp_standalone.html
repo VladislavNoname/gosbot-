@@ -830,7 +830,7 @@ let QUESTIONS_ALL = [];  // Полный набор (включая search_only 
 
 // Версия сборки — видно в консоли при запуске, чтобы понять, какая версия
 // страницы реально загрузилась (а не из кэша Telegram WebView).
-const BUILD_VERSION = 'network-first-questions-6 (2026-06)';
+const BUILD_VERSION = 'network-first-questions-7 (2026-06)';
 console.log('[gosexam] BUILD_VERSION =', BUILD_VERSION);
 
 const QUESTIONS_URL = 'https://raw.githubusercontent.com/VladislavNoname/gosbot-/main/questions_miniapp.json';
@@ -2849,16 +2849,16 @@ const Session = {
       label = 'Дальше →';
       action = () => this.goNext();
     }
-    nav.appendChild(el('button', { class: 'btn-primary', onclick: action }, label));
-
-    // Дополнительная кнопка «Пропустить» (только до проверки, не на последнем) —
-    // на случай если человек не знает ответа и хочет двигаться дальше
+    // «Пропустить» теперь идёт ПЕРЕД основной кнопкой, чтобы крайней справа
+    // (где обычно жмут) был «Проверить», а не «Пропустить» — люди промахивались.
     if (!checked && !isLast) {
       nav.appendChild(el('button', {
         class: 'btn-ghost',
         onclick: () => this.goNext(),
       }, 'Пропустить'));
     }
+
+    nav.appendChild(el('button', { class: 'btn-primary', onclick: action }, label));
 
     App.root.appendChild(nav);
 
